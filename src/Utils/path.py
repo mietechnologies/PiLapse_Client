@@ -36,4 +36,22 @@ def is_file(path: str) -> bool:
     path: str
         The full path to the file/directory to be checked.
     '''
-    return os.path.isfile(path) 
+    return os.path.isfile(path)
+
+def project_path(path: str = None, filename: str = None, should_create: bool = True) -> str:
+    '''
+    
+    '''
+    root = os.path.dirname(__file__)
+    project = os.path.join(root, '..')
+    if path is not None:
+        directory = os.path.join(project, path)
+    else:
+        directory = project
+
+    if should_create and not os.path.exists(directory):
+        os.makedirs(directory)
+
+    if filename:
+        return os.path.join(directory, filename)
+    return directory.replace(' ', '\\ ')

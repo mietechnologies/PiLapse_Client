@@ -1,5 +1,5 @@
 import yaml
-from path import system_path
+from Utils.path import is_file
 
 def parse_yaml(path: str) -> dict:
     '''
@@ -13,9 +13,9 @@ def parse_yaml(path: str) -> dict:
         Returns a dictionary of the keys and values parsed from the yaml file or
         None if the file is invalid.
     '''
-    if path.is_file(path):
-        with open(file, 'r', encoding='utf8') as yaml_file:
-            return yaml.load(yaml_file, yaml.loader)
+    if is_file(path):
+        with open(path, 'r', encoding='utf8') as yaml_file:
+            return yaml.load(yaml_file, yaml.Loader)
     return None
 
 def write_yaml(path: str, data: dict) -> dict:
