@@ -2,8 +2,9 @@ import os
 
 def system_path(to_dir: str, filename: str = None, should_create: bool = True) -> str:
     '''
-    Creates a path to the designated directory on disk. By default, if the
-    directory does not exist, this method will create it automatically.
+    Creates a path to the designated directory/file from the user's root
+    directory. By default, if the directory does not exist, this method will 
+    create it automatically.
 
     Params:
     to_dir: str
@@ -26,3 +27,13 @@ def system_path(to_dir: str, filename: str = None, should_create: bool = True) -
         return os.path.join(directory, filename)
 
     return directory
+
+def is_file(path: str) -> bool:
+    '''
+    Determines if the given path is a valid file.
+
+    Params:
+    path: str
+        The full path to the file/directory to be checked.
+    '''
+    return os.path.isfile(path) 
