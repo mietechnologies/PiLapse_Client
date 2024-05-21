@@ -1,5 +1,5 @@
 import re
-from .option import Option, check_against, construct_output
+from .option import Option, check_against, construct_output, process_option_list
 
 __url_pattern = r'(https?:\/\/)?(www\.)?[-a-zA-Z0-9@:%._\+~#=]{1,256}\.[a-zA-Z0-9()]{1,6}\b([-a-zA-Z0-9()@:%_\+.~#?&\/\/=]*)'
 
@@ -71,6 +71,27 @@ def choice_input(output, options, default=None, abrv=True):
             return possible_option.response
         else:
             print("I'm sorry, I didn't understand that input.")
+
+def list_input(output, options):
+    option_list = construct_output(options, abrv=False)
+    message = f'{output} {option_list}(enter your list separated by \',\') '
+    valid_input = False
+
+    while not valid_input:
+        user_input = input(message)
+        user_list = process_option_list(user_input)
+        possible_options = []
+
+        for item in user_list:
+            possible_option = check_against(options, item)
+            if possible_option:
+                possible_options.append(possible_option)
+            else:
+                print("I'm sorry, that is an invalid response. Please try again.")
+                possible_options = []
+                break
+        else:
+            return possible_options
 
 def range_input(output, lower, upper, default=None):
     message = f'{output} [{lower}-{upper}] '

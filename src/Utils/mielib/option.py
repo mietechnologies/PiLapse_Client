@@ -8,7 +8,7 @@ class Option:
         self.abreviated = abrv.lower()
         self.full = full.lower()
         self.response = response
-        self.all = [abrv, full]
+        self.all = [self.abreviated, self.full]
 
     def __eq__(self, __o: object) -> bool:
         if (isinstance(__o, Option)):
@@ -42,3 +42,7 @@ def construct_output(options, default=None, abrv=True):
 
     output = "|".join(choice_list)
     return "[{}]".format(output)
+
+def process_option_list(input):
+    input = input.replace(" ", "")
+    return input.split(",")
