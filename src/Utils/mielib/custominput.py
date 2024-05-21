@@ -79,7 +79,7 @@ def list_input(output, options):
 
     while not valid_input:
         user_input = input(message)
-        user_list = process_option_list(user_input)
+        user_list = list(set(process_option_list(user_input)))
         possible_options = []
 
         for item in user_list:
