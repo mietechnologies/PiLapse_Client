@@ -1,0 +1,71 @@
+# PiLapse systemd service — one instance per profile
+#
+# INSTALL:
+#   sudo cp systemd/timelapse@.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now timelapse@default
+#
+# The '@' allows parameterized instances:
+#   timelapse@default.service  → profile 'default'
+#   timelapse@garden.service   → profile 'garden'
+#
+# MANAGING:
+#   sudo systemctl start   timelapse@default
+#   sudo systemctl stop    timelapse@default
+#   sudo systemctl restart timelapse@default
+#   journalctl -u timelapse@default -f    # live logs
+#
+# SECRETS (recommended approach):
+#   Create /etc/timelapse/<profile>.env with 0600 root:root permissions.
+#   Add lines like:
+#     TIMELAPSE_RTMP_KEY_DEFAULT=your-stream-key
+#     TIMELAPSE_WEB_PASSWORD=your-preview-password
+#     TIMELAPSE_OWM_KEY=your-owm-api-key
+#
+#   sudo install -m 600 /dev/null /etc/timelapse/default.env
+#   echo 'TIMELAPSE_RTMP_KEY_DEFAULT=xxxx' | sudo tee -a /etc/timelapse/default.env
+
+[Unit]
+Description=PiLapse timelapse service (profile: %i)
+After=network-online.target
+Wants=network-online.target
+# Restart if the camera isn't ready at first boot
+StartLimitIntervalSec=120
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=pi
+Group=pi
+
+# Profile name is the systemd instance (%i)
+Environment=TIMELAPSE_PROFILE=%i
+
+# Load secrets from profile-specific env file if it exists
+# Create with: sudo install -m 600 /dev/null /etc/timelapse/%i.env
+EnvironmentFile=-/etc/timelapse/%i.env
+
+# Run in foreground; systemd handles daemonization
+ExecStart=/usr/local/bin/timelapse --profile %i run
+
+# Graceful stop on SIGTERM (the app handles it)
+KillSignal=SIGTERM
+TimeoutStopSec=30
+
+# Restart on failure (not on clean exit or explicit stop)
+Restart=on-failure
+RestartSec=10
+
+# Resource limits — keeps Pi Zero W responsive under load
+# Lower priority than system services
+Nice=5
+# Limit video generation CPU burst on weak hardware
+CPUQuota=90%
+
+# Logging goes to journald; rotating file logs are also written by the app
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=timelapse-%i
+
+[Install]
+WantedBy=multi-user.target

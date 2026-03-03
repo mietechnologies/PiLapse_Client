@@ -1,0 +1,64 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.backends.legacy:build"
+
+[project]
+name = "pilapse"
+version = "0.1.0"
+description = "Raspberry Pi timelapse system with live preview and RTMP restreaming"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = [{ name = "PiLapse Contributors" }]
+keywords = ["raspberry-pi", "timelapse", "camera", "libcamera", "streaming"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: Console",
+    "Intended Audience :: End Users/Desktop",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Multimedia :: Video :: Capture",
+]
+
+# ─── Required dependencies (minimal) ────────────────────────────────────────
+dependencies = [
+    "click>=8.1",           # CLI framework
+    "pydantic>=2.5",        # Config validation
+    "pyyaml>=6.0",          # YAML config files
+    "requests>=2.31",       # OpenWeatherMap API
+    "astral>=3.2",          # Offline solar calculations (fallback)
+    "python-dateutil>=2.8", # Robust date/time parsing
+    "tzlocal>=5.0",         # System timezone detection
+]
+
+[project.optional-dependencies]
+# Nice-to-have: install for development/testing only
+dev = [
+    "pytest>=8.0",
+    "pytest-mock>=3.12",
+    "freezegun>=1.4",   # Freeze time in scheduler tests
+    "pyfakefs>=5.3",    # Fake filesystem for config tests
+]
+# picamera2 is installed via apt on Raspberry Pi OS, NOT pip.
+# Listed here for documentation only; do not pip-install on non-Pi.
+# camera = ["picamera2"]
+
+[project.scripts]
+timelapse = "timelapse.cli:cli"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["timelapse*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+addopts = "-v --tb=short"
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"

@@ -1,0 +1,119 @@
+# PiLapse — Profile: default
+# Location: ~/.config/timelapse/profiles/default.yaml
+#
+# Copy this to ~/.config/timelapse/profiles/<name>.yaml for each setup.
+# Use `timelapse --profile <name> setup` to generate interactively.
+
+# ─── Storage directories ─────────────────────────────────────────────────────
+# {profile} is replaced with the profile name at runtime.
+# Use absolute paths or ~ for home directory.
+photos_dir: "~/timelapse/default/photos"
+videos_dir: "~/timelapse/default/videos"
+archive_dir: "~/timelapse/default/archive"
+
+# ─── Camera / still capture ──────────────────────────────────────────────────
+capture:
+  width: 1920          # Max: 4056 (IMX477), 3280 (IMX219), 2592 (IMX708)
+  height: 1080
+  jpeg_quality: 85     # 1-100; 85 is a good balance for storage vs quality
+  capture_timeout_s: 10
+
+# ─── Capture schedule ────────────────────────────────────────────────────────
+# Choose ONE mode: interval | times | solar
+
+# Mode 1: Fixed interval
+schedule:
+  mode: interval
+  interval: "5m"       # Supported units: s, m, h, d
+
+# Mode 2: Specific times each day (uncomment and remove mode 1)
+# schedule:
+#   mode: times
+#   times:
+#     - "08:00"
+#     - "12:00"
+#     - "17:00"
+#     - "20:30"
+
+# Mode 3: Solar-based (uncomment and remove modes 1 & 2)
+# Requires: pip install astral
+# Optionally uses OpenWeatherMap for refined times (set $TIMELAPSE_OWM_KEY).
+# schedule:
+#   mode: solar
+#   latitude: 51.5074        # London
+#   longitude: -0.1278
+#   owm_api_key_env: "TIMELAPSE_OWM_KEY"   # env var name (not the key itself)
+#   events:
+#     - type: sunrise
+#       offset_minutes: 10   # Capture 10 min after sunrise
+#     - type: solar_noon
+#       offset_minutes: 0
+#     - type: sunset
+#       offset_minutes: -15  # Capture 15 min before sunset
+
+# ─── Disk guard ──────────────────────────────────────────────────────────────
+disk:
+  min_free_gb: 3.0          # Never let free space drop below this
+  check_interval_s: 300     # How often to check (seconds)
+  retention:
+    # oldest_first:         delete oldest files regardless of type
+    # oldest_videos_first:  delete old videos before photos
+    policy: oldest_first
+
+# ─── Video generation ────────────────────────────────────────────────────────
+video:
+  photos_per_video: 100     # Generate a video after this many photos
+  fps: 10                   # Output video frame rate
+  repeat: true              # true = keep capturing after each video
+                            # false = stop after the first video, set status=completed
+  after_video: move_to_archive   # move_to_archive | delete | keep
+  video_codec: libx264      # libx264 (universal) or h264_v4l2m2m (Pi HW)
+  crf: 23                   # Quality (0=lossless, 51=worst). 18-28 is typical.
+
+# ─── Streaming ───────────────────────────────────────────────────────────────
+streaming:
+
+  # Live preview web server
+  preview:
+    enabled: true
+    # auto: MJPEG on Pi Zero W, HLS on Zero 2 W / better
+    # Force with: mjpeg | hls
+    mode: auto
+    host: "127.0.0.1"     # IMPORTANT: 127.0.0.1 = local only (recommended)
+                           # Use Tailscale / Cloudflare Tunnel for internet access
+                           # See README § Secure internet access
+    port: 8080
+
+    # HLS-specific settings (Pi Zero 2 W or better)
+    hls_width: 1280
+    hls_height: 720
+    hls_fps: 15
+    hls_segment_seconds: 2
+    hls_list_size: 5
+
+    # MJPEG-specific settings (Pi Zero W)
+    mjpeg_width: 640
+    mjpeg_height: 360
+    mjpeg_fps: 1.0
+
+    # Optional HTTP Basic Auth
+    auth:
+      enabled: false
+      username: "timelapse"
+      # Password comes from this env var — NEVER store plaintext here
+      password_env: "TIMELAPSE_WEB_PASSWORD"
+
+  # RTMP restream (YouTube / Twitch / etc.)
+  # NOT supported on Pi Zero W.
+  rtmp:
+    enabled: false
+    rtmp_url: "rtmp://a.rtmp.youtube.com/live2"
+    # Stream key env var — NEVER paste the key here
+    stream_key_env: "TIMELAPSE_RTMP_KEY_DEFAULT"
+    # Optional: read from secrets file instead of env var
+    # secrets_file: "~/.config/timelapse/secrets/default.env"
+    video_bitrate: "1000k"   # 1000k–2500k for YouTube; 500k–3500k for Twitch
+    audio_enabled: false
+    width: 1280
+    height: 720
+    fps: 30

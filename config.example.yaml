@@ -1,0 +1,15 @@
+# PiLapse — Global Configuration
+# Location: ~/.config/timelapse/config.yaml
+#
+# This file contains settings that apply to ALL profiles.
+# Profile-specific settings live in ~/.config/timelapse/profiles/<name>.yaml
+
+# Timezone for scheduling.  None = use system timezone (recommended).
+# Examples: "UTC", "America/New_York", "Europe/London", "Asia/Tokyo"
+timezone: null
+
+# Logging level: DEBUG | INFO | WARNING | ERROR
+log_level: "INFO"
+
+# Where log files are stored.  One file per profile, 5 MB × 5 rotations.
+log_dir: "~/.local/share/timelapse/logs"
