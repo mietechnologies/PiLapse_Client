@@ -185,9 +185,11 @@ class PiCamera:
                     continue
 
                 request = self._picam2.capture_request()
-                buf = io.BytesIO()
-                img = request.make_image("lores")
+                img = request.make_image("main")
                 request.release()
+                # Downscale the full-res RGB frame to preview dimensions
+                img.thumbnail((self._pw, self._ph))
+                buf = io.BytesIO()
                 img.save(buf, format="jpeg", quality=70)
                 frame = buf.getvalue()
 
