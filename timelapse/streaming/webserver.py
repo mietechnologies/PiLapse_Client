@@ -96,6 +96,7 @@ class StreamingController:
             auth_enabled=cfg.auth.enabled,
             auth_username=cfg.auth.username,
             auth_password=password,
+            mjpeg_fps=cfg.mjpeg_fps,
         )
         self._mjpeg.start()
         self._active_mode = "mjpeg"

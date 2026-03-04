@@ -20,6 +20,7 @@ import base64
 import hashlib
 import io
 import logging
+import socketserver
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, HTTPServer
@@ -56,6 +57,7 @@ class _MJPEGHandler(BaseHTTPRequestHandler):
     auth_username: str = "timelapse"
     auth_password_hash: str = ""  # sha256 hex
     profile: str = "default"
+    frame_interval: float = 0.5  # seconds between frames (1 / mjpeg_fps)
 
     def log_message(self, fmt, *args):  # silence default access log
         logger.debug("MJPEG %s - %s", self.address_string(), fmt % args)
@@ -143,9 +145,19 @@ class _MJPEGHandler(BaseHTTPRequestHandler):
                 self.wfile.write(frame)
                 self.wfile.write(b"\r\n")
                 self.wfile.flush()
-                time.sleep(0.5)  # ~2 fps — adjust via config if needed
+                time.sleep(self.frame_interval)
         except (BrokenPipeError, ConnectionResetError):
             pass  # client disconnected — normal
+
+
+class _ThreadedHTTPServer(socketserver.ThreadingMixIn, HTTPServer):
+    """HTTP server that handles each connection in a dedicated thread.
+
+    Required for MJPEG streaming: the /stream handler loops forever, so a
+    single-threaded server would block all other connections (favicon, the
+    root page, second client, etc.) causing browsers to hang indefinitely.
+    """
+    daemon_threads = True  # threads exit when the main process exits
 
 
 class MJPEGServer:
@@ -162,6 +174,7 @@ class MJPEGServer:
         auth_enabled: bool = False,
         auth_username: str = "timelapse",
         auth_password: str = "",
+        mjpeg_fps: float = 2.0,
     ) -> None:
         self._host = host
         self._port = port
@@ -177,8 +190,9 @@ class MJPEGServer:
         BoundHandler.auth_username = auth_username
         BoundHandler.auth_password_hash = pw_hash
         BoundHandler.profile = profile
+        BoundHandler.frame_interval = max(0.1, 1.0 / mjpeg_fps)
 
-        self._server = HTTPServer((host, port), BoundHandler)
+        self._server = _ThreadedHTTPServer((host, port), BoundHandler)
         self._thread: Optional[threading.Thread] = None
 
     def start(self) -> None:
