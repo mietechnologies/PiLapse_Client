@@ -40,3 +40,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - timelapse/cli.py#_print_status(): Changed `data.get("status", "unknown")` to `state.get_status()` so the displayed status always reflects the authoritative value.
 - timelapse/capture/camera.py#PiCamera.__init__(): Added `preview_fps` parameter; stored as `_preview_interval = max(0.1, 1.0 / preview_fps)` and used in `_preview_loop` instead of a hardcoded 0.5 s delay.
 - timelapse/capture/camera.py#create_camera(): Added `preview_fps` parameter and forwarded it to `PiCamera`.
+- timelapse/streaming/mjpeg.py#MJPEGServer: Switched from single-threaded `HTTPServer` to `ThreadingMixIn`-based server; the `/stream` handler's infinite loop was blocking all other browser connections (root page, favicon, second client), causing browsers to hang on connect.
+- timelapse/streaming/mjpeg.py#_stream_mjpeg(): Replaced hardcoded `time.sleep(0.5)` with configurable `frame_interval` derived from `mjpeg_fps`.
+- timelapse/streaming/webserver.py#_start_mjpeg(): Passed `mjpeg_fps` from profile config through to `MJPEGServer`.
