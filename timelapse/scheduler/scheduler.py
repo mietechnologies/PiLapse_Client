@@ -74,8 +74,8 @@ class Scheduler:
         self._thread = threading.Thread(
             target=self._run, name=f"scheduler-{self._profile}", daemon=True
         )
-        self._thread.start()
         logger.info("Scheduler started for profile '%s'.", self._profile)
+        self._thread.start()
 
     def stop(self, timeout: float = 10.0) -> None:
         self._stop_event.set()
@@ -124,13 +124,18 @@ class Scheduler:
             self._interruptible_sleep(delay)
             if self._stop_event.is_set():
                 return
-
-        # Re-check cooldown after sleep (handles schedule changes / restarts)
-        if self._state.was_recently_captured(CAPTURE_COOLDOWN_S):
-            logger.debug("Skipping — captured within last %d s.", CAPTURE_COOLDOWN_S)
-            # Sleep a bit so we don't spin
-            self._interruptible_sleep(CAPTURE_COOLDOWN_S + 1)
-            return
+            # We slept the full scheduled delay — always capture now.
+            # (Cooldown guard only applies to the startup/catchup path below.)
+        else:
+            # delay <= 0: startup or missed-slot catchup — guard against
+            # double-capture if the service was restarted within the cooldown window.
+            if self._state.was_recently_captured(CAPTURE_COOLDOWN_S):
+                logger.debug(
+                    "Skipping — captured within last %d s (restart guard).",
+                    CAPTURE_COOLDOWN_S,
+                )
+                self._interruptible_sleep(CAPTURE_COOLDOWN_S + 1)
+                return
 
         logger.info("Triggering capture.")
         ok = self._capture_fn()

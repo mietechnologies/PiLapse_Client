@@ -33,3 +33,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 - readme.md: Rewrote to document the standalone architecture, CLI reference, hardware performance tiers, schedule modes, secrets management, and secure internet exposure options.
+- timelapse/scheduler/scheduler.py#_tick(): Fixed critical bug where the 60-second anti-double-capture cooldown was applied after a scheduled sleep, causing captures at intervals shorter than 60 seconds to fire at ~90-second intervals instead of the configured interval; cooldown guard now only applies on startup/catchup (delay ≤ 0).
+- timelapse/scheduler/scheduler.py#start(): Moved `logger.info("Scheduler started")` before `thread.start()` to eliminate a log ordering race where "Triggering capture" appeared before "Scheduler started".
+- timelapse/scheduler/state.py#_load(): Added `setdefault("status", "running")` so the status key is always present after load, preventing `as_dict()` from returning `"unknown"` on first run.
+- timelapse/cli.py#run(): Set `LIBCAMERA_LOG_LEVELS=*:WARNING` before any picamera2 import to suppress verbose libcamera INFO/DEBUG output; wired `preview_fps` from profile config through to `create_camera()`; added 0.5 s sleep before initial status print to avoid a mid-capture race condition.
+- timelapse/cli.py#_print_status(): Changed `data.get("status", "unknown")` to `state.get_status()` so the displayed status always reflects the authoritative value.
+- timelapse/capture/camera.py#PiCamera.__init__(): Added `preview_fps` parameter; stored as `_preview_interval = max(0.1, 1.0 / preview_fps)` and used in `_preview_loop` instead of a hardcoded 0.5 s delay.
+- timelapse/capture/camera.py#create_camera(): Added `preview_fps` parameter and forwarded it to `PiCamera`.

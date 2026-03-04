@@ -89,12 +89,14 @@ class PiCamera:
         preview_width: int = 640,
         preview_height: int = 360,
         jpeg_quality: int = 85,
+        preview_fps: float = 2.0,
     ) -> None:
         self._sw = still_width
         self._sh = still_height
         self._pw = preview_width
         self._ph = preview_height
         self._quality = jpeg_quality
+        self._preview_interval = max(0.1, 1.0 / preview_fps)
 
         self._picam2 = None
         self._started = False
@@ -197,8 +199,8 @@ class PiCamera:
                 time.sleep(1.0)
                 continue
 
-            # Sleep between preview frames (controls MJPEG fps)
-            self._stop_preview.wait(0.5)  # ~2 fps
+            # Sleep between preview frames — respects configured mjpeg_fps
+            self._stop_preview.wait(self._preview_interval)
 
     def get_preview_frame(self) -> Optional[bytes]:
         """Return the latest JPEG preview frame, or None if not yet available."""
@@ -305,6 +307,7 @@ def create_camera(
     preview_width: int = 640,
     preview_height: int = 360,
     jpeg_quality: int = 85,
+    preview_fps: float = 2.0,
 ) -> "PiCamera | MockCamera":
     """
     Return a PiCamera if picamera2 and a real camera are available,
@@ -318,6 +321,7 @@ def create_camera(
             preview_width=preview_width,
             preview_height=preview_height,
             jpeg_quality=jpeg_quality,
+            preview_fps=preview_fps,
         )
     else:
         logger.warning("Camera not available: %s\nUsing MockCamera.", msg)

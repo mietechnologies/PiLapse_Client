@@ -72,6 +72,8 @@ class ProfileState:
                 self._data = {}
         else:
             self._data = {}
+        # Ensure status key always present so as_dict() never returns "unknown"
+        self._data.setdefault("status", "running")
         self._loaded = True
 
     def _save(self) -> None:

@@ -75,6 +75,10 @@ def run(ctx: click.Context, no_preview: bool, no_rtmp: bool) -> None:
     profile = ctx.obj["profile"]
     _check_setup_or_exit(profile)
 
+    # Suppress noisy libcamera INFO/DEBUG lines before any picamera2 import.
+    import os as _os
+    _os.environ.setdefault("LIBCAMERA_LOG_LEVELS", "*:WARNING")
+
     from timelapse.config.loader import load_global_config, load_profile_config
     from timelapse.config.models import SolarSchedule
 
@@ -123,6 +127,7 @@ def run(ctx: click.Context, no_preview: bool, no_rtmp: bool) -> None:
         preview_width=prof_cfg.streaming.preview.mjpeg_width,
         preview_height=prof_cfg.streaming.preview.mjpeg_height,
         jpeg_quality=prof_cfg.capture.jpeg_quality,
+        preview_fps=prof_cfg.streaming.preview.mjpeg_fps,
     )
     cam.start()
 
@@ -209,6 +214,9 @@ def run(ctx: click.Context, no_preview: bool, no_rtmp: bool) -> None:
     signal.signal(signal.SIGTERM, _shutdown)
 
     click.echo(f"PiLapse running — profile '{profile}'.  Press Ctrl-C to stop.")
+    # Brief pause so the scheduler thread can complete its first capture
+    # before the status snapshot is printed (avoids mid-capture race).
+    import time as _time; _time.sleep(0.5)
     _print_status(profile, state, prof_cfg, disk_guard)
 
     # Block main thread indefinitely
@@ -259,7 +267,7 @@ def _print_status(profile: str, state, prof_cfg, disk_guard) -> None:
 
     click.echo(f"\n{'─'*50}")
     click.echo(f"  Profile:       {profile}")
-    click.echo(f"  Status:        {data.get('status', 'unknown')}")
+    click.echo(f"  Status:        {state.get_status()}")
     click.echo(f"  Schedule:      {sched_str}")
     click.echo(f"  Total photos:  {data.get('photo_count', 0)}")
     click.echo(f"  Current batch: {data.get('current_batch', 0)} / {prof_cfg.video.photos_per_video}")
