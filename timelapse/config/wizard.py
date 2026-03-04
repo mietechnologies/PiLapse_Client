@@ -203,14 +203,14 @@ def run_wizard(profile: str = "default") -> None:
     preview_enabled = _confirm("Enable live preview web server?", default=True)
     auth_enabled = False
     auth = AuthConfig()
-    preview_host = "127.0.0.1"
+    preview_host = "0.0.0.0"
     preview_port = 8080
     preview_mode = "auto"
 
     if preview_enabled:
         preview_host = _prompt(
-            "Bind host (127.0.0.1 for local only; 0.0.0.0 to expose — use a tunnel instead)",
-            "127.0.0.1",
+            "Bind host (0.0.0.0 to expose on LAN; 127.0.0.1 for local only)",
+            "0.0.0.0",
         )
         preview_port_s = _prompt("Port", "8080")
         preview_port = int(preview_port_s)

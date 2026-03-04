@@ -161,7 +161,7 @@ class PreviewConfig(BaseModel):
     enabled: bool = True
     # auto: use HLS on Pi Zero 2 W or better; fall back to MJPEG on Zero W
     mode: Literal["auto", "hls", "mjpeg"] = "auto"
-    host: str = "127.0.0.1"
+    host: str = "0.0.0.0"
     port: int = Field(8080, ge=1024, le=65535)
     auth: AuthConfig = Field(default_factory=AuthConfig)
     # HLS-specific (Pi Zero 2 W / better)
