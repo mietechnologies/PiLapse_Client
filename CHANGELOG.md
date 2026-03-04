@@ -6,6 +6,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.0] - 2026.03.04
+
 ### Added
 - Added fully standalone on-device timelapse system eliminating the external server dependency.
 - Added `timelapse` CLI with subcommands: `setup`, `run`, `status`, `snapshot`, `gen-video`, `config validate`, and `config show`.
