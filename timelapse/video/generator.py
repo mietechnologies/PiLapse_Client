@@ -166,6 +166,7 @@ class VideoGenerator:
             "-r", str(self._cfg.video.fps),    # constant frame rate (QuickTime compat)
             "-pix_fmt", "yuv420p",             # broad player compatibility
             "-movflags", "+faststart",         # moov atom at front (QuickTime / web)
+            "-threads", "2",                   # cap thread count to limit peak RAM on Pi
             str(output),
         ]
         logger.debug("ffmpeg command: %s", " ".join(cmd))
