@@ -161,10 +161,11 @@ class VideoGenerator:
             "-f", "concat",
             "-safe", "0",
             "-i", str(list_file),
-            "-vsync", "vfr",
             "-c:v", self._cfg.video.video_codec,
             "-crf", str(self._cfg.video.crf),
+            "-r", str(self._cfg.video.fps),    # constant frame rate (QuickTime compat)
             "-pix_fmt", "yuv420p",             # broad player compatibility
+            "-movflags", "+faststart",         # moov atom at front (QuickTime / web)
             str(output),
         ]
         logger.debug("ffmpeg command: %s", " ".join(cmd))
