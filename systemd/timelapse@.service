@@ -1,13 +1,16 @@
 # PiLapse systemd service — one instance per profile
 #
-# INSTALL:
+# INSTALL (see README § Install):
 #   sudo cp systemd/timelapse@.service /etc/systemd/system/
+#   sudo sed -i "s/^User=.*/User=$USER/; s/^Group=.*/Group=$USER/" \
+#       /etc/systemd/system/timelapse@.service
 #   sudo systemctl daemon-reload
 #   sudo systemctl enable --now timelapse@default
 #
 # The '@' allows parameterized instances:
 #   timelapse@default.service  → profile 'default'
 #   timelapse@garden.service   → profile 'garden'
+# Only one profile can use a given camera at a time.
 #
 # MANAGING:
 #   sudo systemctl start   timelapse@default
@@ -22,31 +25,37 @@
 #     TIMELAPSE_WEB_PASSWORD=your-preview-password
 #     TIMELAPSE_OWM_KEY=your-owm-api-key
 #
+#   sudo install -d -m 700 /etc/timelapse
 #   sudo install -m 600 /dev/null /etc/timelapse/default.env
 #   echo 'TIMELAPSE_RTMP_KEY_DEFAULT=xxxx' | sudo tee -a /etc/timelapse/default.env
 
 [Unit]
 Description=PiLapse timelapse service (profile: %i)
-After=network-online.target
+After=network-online.target mediamtx.service
 Wants=network-online.target
-# Restart if the camera isn't ready at first boot
-StartLimitIntervalSec=120
+# Retry if the camera isn't ready at first boot, but give up on a crash loop
+StartLimitIntervalSec=300
 StartLimitBurst=5
 
 [Service]
 Type=simple
+# Set to the account that ran `timelapse setup` (Raspberry Pi OS Bookworm
+# has no default "pi" user) — the sed command above does this.
 User=pi
 Group=pi
+# Camera devices (/dev/video*, /dev/media*) belong to the video group
+SupplementaryGroups=video
 
 # Profile name is the systemd instance (%i)
 Environment=TIMELAPSE_PROFILE=%i
+# Python output straight to the journal, unbuffered
+Environment=PYTHONUNBUFFERED=1
 
 # Load secrets from profile-specific env file if it exists
-# Create with: sudo install -m 600 /dev/null /etc/timelapse/%i.env
 EnvironmentFile=-/etc/timelapse/%i.env
 
-# Run in foreground; systemd handles daemonization
-ExecStart=/usr/local/bin/timelapse --profile %i run
+# The venv created in README § Install
+ExecStart=/opt/pilapse/venv/bin/timelapse --profile %i run
 
 # Graceful stop on SIGTERM (the app handles it)
 KillSignal=SIGTERM
@@ -56,11 +65,15 @@ TimeoutStopSec=30
 Restart=on-failure
 RestartSec=10
 
-# Resource limits — keeps Pi Zero W responsive under load
-# Lower priority than system services
+# Stay out of the way of system services.  No CPUQuota: it is measured
+# against ONE core, so the old 90% capped this service at under a quarter
+# of a quad-core Pi Zero 2 W and slowed video generation.
 Nice=5
-# Limit video generation CPU burst on weak hardware
-CPUQuota=90%
+
+# Hardening that doesn't affect camera or home-directory access
+NoNewPrivileges=yes
+ProtectSystem=full
+PrivateTmp=yes
 
 # Logging goes to journald; rotating file logs are also written by the app
 StandardOutput=journal

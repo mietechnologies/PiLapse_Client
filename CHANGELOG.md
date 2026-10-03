@@ -20,7 +20,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Unknown config keys (typos, removed settings) are now reported as warnings on load and by `timelapse config validate`.
 - Setup wizard asks for live view mode, defaults MJPEG to requiring a login, and asks for live video quality.
 
+### Changed — deployment
+- systemd/timelapse@.service: removed `CPUQuota=90%` — it is measured against one core, so it held the service to under a quarter of a quad-core Pi Zero 2 W. `ExecStart` now points at the `/opt/pilapse/venv` virtualenv from the new install steps; adds the `video` group, ordering after MediaMTX, and basic hardening. Install instructions set `User=` to your account (Bookworm has no default `pi` user).
+- deploy/mediamtx.service: new unit running MediaMTX as an unprivileged dynamic user.
+- deploy/mediamtx.yml: disables MediaMTX's MoQ server (unused; it opened two extra ports and wrote TLS files to its working directory). Requires MediaMTX v1.21+.
+- readme.md: new install section (virtualenv with `--system-site-packages`, since Bookworm blocks system pip and picamera2 comes from apt), live view and RTMP sections, Pi Zero 2 W Wi-Fi/thermal tips; removed the incorrect "binds to localhost by default" claim.
+
 ### Fixed
+- timelapse/cli.py: `timelapse run` no longer prompts when there is no terminal (systemd). A completed profile exits cleanly instead of crash-looping; a missing camera exits with an error so systemd retries.
+- pyproject.toml: `readme` pointed at `README.md` but the file is `readme.md`, so built packages silently had no description.
 - timelapse/cli.py: `--no-rtmp` was accepted but ignored, and `--no-preview` also disabled RTMP.
 - timelapse/cli.py: `timelapse snapshot` while the service is running now explains that the camera is in use instead of failing with a libcamera error.
 

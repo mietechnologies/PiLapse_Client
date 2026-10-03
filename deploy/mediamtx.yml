@@ -8,7 +8,9 @@
 #   HLS    (browser, a few seconds behind) http://<pi>:8888/<profile>/
 #   RTSP   (VLC, Frigate, Home Assistant)  rtsp://<pi>:8554/<profile>
 #
-# Unlisted settings use MediaMTX's defaults.
+# Unlisted settings use MediaMTX's defaults.  Requires MediaMTX v1.21 or
+# later: MediaMTX refuses to start on settings it doesn't know, and `moq`
+# below was added in v1.21.
 
 logLevel: info
 
@@ -34,7 +36,7 @@ authInternalUsers:
       - action: read
 
 # ─── Protocols ────────────────────────────────────────────────────────────────
-rtsp: true      # PiLapse publishes over this; also for NVRs / VLC
+rtsp: true      # PiLapse publishes over this; also for NVRs / VLC (TCP 8554, UDP 8000-8001)
 webrtc: true    # Browser live view.  Needs UDP 8189 reachable from viewers.
 hls: true       # Browser fallback where WebRTC is blocked
 rtmp: false     # Not needed: PiLapse pushes RTMP to platforms itself
@@ -42,6 +44,7 @@ srt: false
 api: false      # Enable (localhost only, per the rule above) for health checks
 metrics: false
 playback: false
+moq: false      # Media-over-QUIC: unused, and would open ports 8892-8893
 
 paths:
   all_others:

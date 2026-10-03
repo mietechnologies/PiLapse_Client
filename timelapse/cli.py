@@ -104,12 +104,17 @@ def run(ctx: click.Context, no_preview: bool, no_rtmp: bool) -> None:
     from timelapse.scheduler.state import ProfileState
 
     state = ProfileState(profile)
-    if state.get_status() == "completed" and not click.confirm(
-        f"Profile '{profile}' is marked completed. Reset and start fresh?", default=False
-    ):
-        click.echo("Aborted. Use `timelapse status` to inspect.")
-        sys.exit(0)
     if state.get_status() == "completed":
+        # Under systemd there is no terminal to ask; exit cleanly (code 0, so
+        # Restart=on-failure doesn't loop) and leave the decision to the user.
+        if not _interactive() or not click.confirm(
+            f"Profile '{profile}' is marked completed. Reset and start fresh?", default=False
+        ):
+            click.echo(
+                f"Profile '{profile}' is completed. Use `timelapse status` to inspect, "
+                f"or run `timelapse --profile {profile} run` in a terminal to reset it."
+            )
+            sys.exit(0)
         state.reset()
 
     # ── camera ────────────────────────────────────────────────────────────
@@ -118,7 +123,11 @@ def run(ctx: click.Context, no_preview: bool, no_rtmp: bool) -> None:
     avail, msg = check_camera_available()
     if not avail:
         click.echo(f"[WARNING] {msg}", err=True)
-        if not click.confirm("Continue with MockCamera (for testing)?", default=False):
+        # Non-interactive (systemd): fail so the unit retries — the camera
+        # may simply not be ready yet at boot.
+        if not _interactive() or not click.confirm(
+            "Continue with MockCamera (for testing)?", default=False
+        ):
             sys.exit(1)
 
     cam = _make_camera(prof_cfg)
@@ -395,6 +404,10 @@ def config_show(ctx: click.Context) -> None:
 
 
 # ─── helpers ─────────────────────────────────────────────────────────────────
+
+
+def _interactive() -> bool:
+    return sys.stdin.isatty()
 
 
 def _make_camera(prof_cfg):

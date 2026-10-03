@@ -1,0 +1,29 @@
+# MediaMTX systemd service — serves the PiLapse live view.
+#
+# INSTALL (see README § Live view):
+#   sudo cp deploy/mediamtx.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now mediamtx
+
+[Unit]
+Description=MediaMTX media server (PiLapse live view)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/mediamtx /usr/local/etc/mediamtx.yml
+Restart=always
+RestartSec=5
+
+# Runs as a throwaway unprivileged user; it needs no files of its own.
+DynamicUser=yes
+StateDirectory=mediamtx
+WorkingDirectory=/var/lib/mediamtx
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+
+[Install]
+WantedBy=multi-user.target
