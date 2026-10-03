@@ -20,18 +20,16 @@ ffmpeg binary must be installed: sudo apt install -y ffmpeg
 
 from __future__ import annotations
 
-import base64
-import hashlib
 import logging
-import os
 import shutil
-import subprocess
 import tempfile
 import threading
-import time
-from http.server import BaseHTTPRequestHandler, HTTPServer
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Optional
+from urllib.parse import unquote, urlsplit
+
+from timelapse.streaming.auth import check_basic_auth, hash_password
 
 logger = logging.getLogger(__name__)
 
@@ -80,17 +78,25 @@ class _HLSHTTPHandler(BaseHTTPRequestHandler):
     def _check_auth(self) -> bool:
         if not self.auth_enabled:
             return True
-        auth_header = self.headers.get("Authorization", "")
-        if not auth_header.startswith("Basic "):
-            return False
-        try:
-            decoded = base64.b64decode(auth_header[6:]).decode()
-            user, _, password = decoded.partition(":")
-            if user != self.auth_username:
-                return False
-            return hashlib.sha256(password.encode()).hexdigest() == self.auth_password_hash
-        except Exception:
-            return False
+        return check_basic_auth(
+            self.headers.get("Authorization", ""), self.auth_username, self.auth_password_hash
+        )
+
+    def _resolve_segment(self, rel: str) -> Optional[Path]:
+        """Map a request path to a file directly inside hls_dir, or None.
+
+        Only bare filenames are served: anything with a separator or a
+        parent reference is rejected before touching the filesystem.
+        """
+        name = unquote(rel)
+        if not name or "/" in name or "\\" in name or name in (".", ".."):
+            return None
+        if not (name.endswith(".m3u8") or name.endswith(".ts")):
+            return None
+        path = (self.hls_dir / name).resolve()
+        if path.parent != self.hls_dir.resolve() or not path.is_file():
+            return None
+        return path
 
     def _send_401(self):
         self.send_response(401)
@@ -103,7 +109,8 @@ class _HLSHTTPHandler(BaseHTTPRequestHandler):
             self._send_401()
             return
 
-        if self.path in ("/", "/index.html"):
+        path = urlsplit(self.path).path
+        if path in ("/", "/index.html"):
             body = _HLS_INDEX_HTML.format(profile=self.profile).encode()
             self.send_response(200)
             self.send_header("Content-Type", "text/html; charset=utf-8")
@@ -112,18 +119,22 @@ class _HLSHTTPHandler(BaseHTTPRequestHandler):
             self.wfile.write(body)
             return
 
-        if self.path.startswith("/hls/"):
-            rel = self.path[5:]  # strip "/hls/"
-            file_path = self.hls_dir / rel
-            if not file_path.exists() or not file_path.is_file():
+        if path.startswith("/hls/"):
+            file_path = self._resolve_segment(path[5:])  # strip "/hls/"
+            if file_path is None:
                 self.send_response(404)
                 self.end_headers()
                 return
             content_type = (
-                "application/vnd.apple.mpegurl" if rel.endswith(".m3u8")
+                "application/vnd.apple.mpegurl" if file_path.suffix == ".m3u8"
                 else "video/mp2t"
             )
-            data = file_path.read_bytes()
+            try:
+                data = file_path.read_bytes()
+            except OSError:  # segment rotated away between resolve and read
+                self.send_response(404)
+                self.end_headers()
+                return
             self.send_response(200)
             self.send_header("Content-Type", content_type)
             self.send_header("Content-Length", str(len(data)))
@@ -170,7 +181,7 @@ class HLSManager:
         self._hls_dir = Path(tempfile.gettempdir()) / f"pilapse_hls_{profile}"
         self._hls_dir.mkdir(parents=True, exist_ok=True)
 
-        pw_hash = hashlib.sha256(auth_password.encode()).hexdigest() if auth_password else ""
+        pw_hash = hash_password(auth_password) if auth_password else ""
 
         class BoundHandler(_HLSHTTPHandler):
             pass
@@ -181,7 +192,10 @@ class HLSManager:
         BoundHandler.auth_username = auth_username
         BoundHandler.auth_password_hash = pw_hash
 
-        self._http_server = HTTPServer((http_host, http_port), BoundHandler)
+        # Threaded: hls.js fetches the playlist and segments concurrently, and
+        # one slow client must not stall the others.
+        self._http_server = ThreadingHTTPServer((http_host, http_port), BoundHandler)
+        self._http_server.daemon_threads = True
         self._http_thread: Optional[threading.Thread] = None
         self._encoder = None
         self._started = False
@@ -192,12 +206,14 @@ class HLSManager:
         """Start both the ffmpeg HLS encoder and the HTTP server. Returns False on error."""
         if not shutil.which("ffmpeg"):
             logger.error("ffmpeg not found. Install: sudo apt install -y ffmpeg")
+            self._http_server.server_close()  # free the port for the MJPEG fallback
             return False
 
         try:
             self._start_encoder()
         except Exception as exc:
             logger.error("HLS encoder failed to start: %s", exc)
+            self._http_server.server_close()  # free the port for the MJPEG fallback
             return False
 
         self._http_thread = threading.Thread(
@@ -223,7 +239,9 @@ class HLSManager:
                 logger.warning("Error stopping HLS encoder: %s", exc)
             self._encoder = None
 
-        self._http_server.shutdown()
+        if self._started:
+            self._http_server.shutdown()
+        self._http_server.server_close()
         if self._http_thread:
             self._http_thread.join(timeout=5)
         self._started = False

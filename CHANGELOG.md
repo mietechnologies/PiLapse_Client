@@ -6,6 +6,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+- timelapse/streaming/hls.py: Fixed path traversal in the HLS file server — `GET /hls/../../<path>` returned any file readable by the service user. Only bare `.m3u8`/`.ts` filenames inside the segment directory are now served.
+- timelapse/streaming/webserver.py: Preview server now refuses to start when auth is enabled but the password variable is unset (previously it silently served unauthenticated), and warns when serving on a non-loopback address without auth.
+- timelapse/streaming/auth.py: Shared Basic Auth check for MJPEG and HLS using constant-time comparison (`hmac.compare_digest`).
+
+### Fixed
+- timelapse/scheduler/scheduler.py: A failed capture (camera missing, disk full) no longer retries in a tight loop (~10k attempts/s on interval schedules); retries now back off 10 s → 300 s and reset on success.
+- timelapse/disk/guard.py: Disk guard now finds photos archived in `archive_dir/<video>/` subfolders. Previously they were never reclaimed and the guard deleted videos and unprocessed photos instead. Emptied archive subfolders are removed.
+- timelapse/streaming/hls.py: HLS server releases its port when the encoder fails, so the MJPEG fallback can bind (was `Address already in use`). HLS server is now threaded.
+- timelapse/video/generator.py: A failed video generation no longer re-runs a full encode on every subsequent capture; automatic retries wait 30 minutes.
+- timelapse/video/generator.py: Photos captured while a video is encoding now count toward the next batch instead of being dropped from the counter.
+- timelapse/video/generator.py: `h264_v4l2m2m` is rate-controlled with the new `video.bitrate` setting (default `8M`); it ignores `crf`, which produced low-quality output.
+
 ## [0.1.0] - 2026.03.04
 
 ### Added

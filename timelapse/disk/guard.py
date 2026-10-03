@@ -31,15 +31,24 @@ def _free_gb(path: Path) -> float:
 
 
 def _collect_files(dirs: list[Path], extensions: tuple[str, ...]) -> list[Path]:
-    """Return all files with `extensions` from `dirs`, sorted oldest first."""
-    files: list[Path] = []
+    """Return all files with `extensions` under `dirs` (recursively), oldest first.
+
+    Recursive because the video generator archives photos into
+    archive_dir/<video-stem>/ subdirectories.
+    """
+    found: dict[Path, float] = {}
     for d in dirs:
-        if d.exists():
-            for f in d.iterdir():
-                if f.is_file() and f.suffix.lower() in extensions:
-                    files.append(f)
-    files.sort(key=lambda f: f.stat().st_mtime)
-    return files
+        if not d.exists():
+            continue
+        for f in d.rglob("*"):
+            if f.suffix.lower() not in extensions:
+                continue
+            try:
+                if f.is_file():
+                    found[f] = f.stat().st_mtime
+            except OSError:
+                continue  # moved/deleted concurrently (e.g. by video generation)
+    return sorted(found, key=found.__getitem__)
 
 
 def _safe_to_delete(path: Path, allowed_dirs: list[Path]) -> bool:
@@ -108,6 +117,7 @@ class DiskGuard:
                     "Disk guard deleted %s (%.1f MB) to free space.", path, size_mb
                 )
                 deleted += 1
+                self._remove_if_empty_archive_subdir(path.parent)
             except OSError as exc:
                 logger.error("Could not delete %s: %s", path, exc)
 
@@ -120,6 +130,14 @@ class DiskGuard:
             )
 
         return deleted
+
+    def _remove_if_empty_archive_subdir(self, d: Path) -> None:
+        """Drop an archive/<video-stem>/ folder once its last photo is gone."""
+        try:
+            if d.resolve().parent == self._archive_dir.resolve() and not any(d.iterdir()):
+                d.rmdir()
+        except OSError:
+            pass
 
     # ── deletion order ─────────────────────────────────────────────────────
 

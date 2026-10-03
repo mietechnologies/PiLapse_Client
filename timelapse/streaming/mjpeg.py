@@ -16,15 +16,14 @@ Performance on Pi Zero W:
 
 from __future__ import annotations
 
-import base64
-import hashlib
-import io
 import logging
 import socketserver
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from typing import Callable, Optional
+
+from timelapse.streaming.auth import check_basic_auth, hash_password
 
 logger = logging.getLogger(__name__)
 
@@ -67,18 +66,9 @@ class _MJPEGHandler(BaseHTTPRequestHandler):
     def _check_auth(self) -> bool:
         if not self.auth_enabled:
             return True
-        auth_header = self.headers.get("Authorization", "")
-        if not auth_header.startswith("Basic "):
-            return False
-        try:
-            decoded = base64.b64decode(auth_header[6:]).decode()
-            user, _, password = decoded.partition(":")
-            if user != self.auth_username:
-                return False
-            pw_hash = hashlib.sha256(password.encode()).hexdigest()
-            return pw_hash == self.auth_password_hash
-        except Exception:
-            return False
+        return check_basic_auth(
+            self.headers.get("Authorization", ""), self.auth_username, self.auth_password_hash
+        )
 
     def _send_401(self) -> None:
         self.send_response(401)
@@ -180,7 +170,7 @@ class MJPEGServer:
         self._port = port
 
         # Build a handler class with injected dependencies (avoids globals)
-        pw_hash = hashlib.sha256(auth_password.encode()).hexdigest() if auth_password else ""
+        pw_hash = hash_password(auth_password) if auth_password else ""
 
         class BoundHandler(_MJPEGHandler):
             pass

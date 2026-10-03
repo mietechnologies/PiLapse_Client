@@ -246,3 +246,70 @@ class TestDiskGuard:
         # File outside → not safe
         outsider = tmp_path.parent / "important.jpg"
         assert _safe_to_delete(outsider, [photos, videos, archive]) is False
+
+    def test_archived_photos_are_deletion_candidates(self, tmp_path):
+        """Archived photos live in archive/<video-stem>/ and must be reclaimable."""
+        import os
+
+        from timelapse.disk.guard import DiskGuard
+
+        photos, videos, archive = tmp_path / "p", tmp_path / "v", tmp_path / "a"
+        for d in (photos, videos, archive):
+            d.mkdir()
+        old = archive / "timelapse_X" / "frame_old.jpg"
+        old.parent.mkdir()
+        old.write_bytes(b"x")
+        new = photos / "frame_new.jpg"
+        new.write_bytes(b"x")
+        os.utime(old, (1_000, 1_000))
+
+        guard = DiskGuard(3.0, photos, videos, archive)
+        assert guard._deletion_candidates() == [old, new]
+
+    def test_enforce_removes_emptied_archive_subdir(self, tmp_path):
+        from timelapse.disk.guard import DiskGuard
+
+        photos, videos, archive = tmp_path / "p", tmp_path / "v", tmp_path / "a"
+        for d in (photos, videos, archive):
+            d.mkdir()
+        sub = archive / "timelapse_X"
+        sub.mkdir()
+        (sub / "frame_1.jpg").write_bytes(b"x")
+
+        guard = DiskGuard(3.0, photos, videos, archive)
+        # Report "full" until the one file is gone
+        with patch.object(DiskGuard, "has_free_space", side_effect=[False, False, True, True]):
+            assert guard.enforce() == 1
+        assert not sub.exists()
+        assert archive.exists()
+
+
+# ─── failure back-off ──────────────────────────────────────────────────────
+
+
+class TestFailureBackoff:
+    def test_failed_capture_backs_off_instead_of_spinning(self, tmp_path, monkeypatch):
+        state = _make_state(tmp_path, monkeypatch)
+        capture = MagicMock(return_value=False)
+        sched = _make_scheduler(ProfileConfig(), state, capture)
+        sleeps = []
+        monkeypatch.setattr(sched, "_interruptible_sleep", sleeps.append)
+
+        for _ in range(3):
+            sched._tick()
+
+        assert capture.call_count == 3
+        assert sleeps == [10, 20, 40]
+
+    def test_backoff_caps_and_resets_on_success(self, tmp_path, monkeypatch):
+        from timelapse.scheduler.scheduler import FAILURE_BACKOFF_MAX_S
+
+        state = _make_state(tmp_path, monkeypatch)
+        sched = _make_scheduler(ProfileConfig(), state)
+        sched._consecutive_failures = 50
+        assert sched._failure_backoff_s() == FAILURE_BACKOFF_MAX_S
+
+        sched._consecutive_failures = 3
+        monkeypatch.setattr(sched, "_interruptible_sleep", lambda s: None)
+        sched._tick()  # default capture_fn succeeds
+        assert sched._consecutive_failures == 0

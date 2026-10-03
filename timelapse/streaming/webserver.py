@@ -11,6 +11,7 @@ Logic:
 
 from __future__ import annotations
 
+import ipaddress
 import logging
 from typing import Optional
 
@@ -74,6 +75,21 @@ class StreamingController:
             logger.info("Auto preview mode → %s (tier: %s)", mode, get_tier())
 
         password = self._resolve_password(cfg)
+        if cfg.auth.enabled and not password:
+            # Fail closed: the user asked for a login, so never serve without one.
+            logger.error(
+                "Preview auth is enabled but $%s is not set — refusing to start "
+                "the preview server. Set the variable or disable auth.",
+                cfg.auth.password_env,
+            )
+            return
+        if not cfg.auth.enabled and not _is_loopback(cfg.host):
+            logger.warning(
+                "Preview server on %s has NO authentication — anyone who can reach "
+                "port %d can watch this camera. Enable streaming.preview.auth.",
+                cfg.host,
+                cfg.port,
+            )
 
         if mode == "mjpeg":
             self._start_mjpeg(cfg, password)
@@ -175,17 +191,19 @@ class StreamingController:
             return ""
         from timelapse.utils.secrets import get_secret
 
-        pw = get_secret(cfg.auth.password_env)
-        if not pw:
-            logger.warning(
-                "Web auth is enabled but $%s is not set. "
-                "Preview server will be unprotected.",
-                cfg.auth.password_env,
-            )
-        return pw or ""
+        return get_secret(cfg.auth.password_env) or ""
 
     def status(self) -> dict:
         return {
             "preview_mode": self._active_mode,
             "rtmp_active": self._rtmp.is_running() if self._rtmp else False,
         }
+
+
+def _is_loopback(host: str) -> bool:
+    if host == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False

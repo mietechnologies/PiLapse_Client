@@ -23,11 +23,11 @@ ffmpeg must be installed: sudo apt install -y ffmpeg
 from __future__ import annotations
 
 import logging
-import os
 import re
 import shutil
 import subprocess
 import threading
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
@@ -39,6 +39,22 @@ logger = logging.getLogger(__name__)
 
 # Regex to extract timestamp from filenames like frame_20240115T083012Z.jpg
 _FRAME_TS_RE = re.compile(r"frame_(\d{8}T\d{6}Z)")
+
+# After a failed generation, automatic triggers are ignored for this long.
+# The batch counter stays above the threshold after a failure, so without
+# this every subsequent capture would start another full encode.
+RETRY_COOLDOWN_S = 1800
+
+# Encoders that are rate-controlled by bitrate rather than crf
+_BITRATE_CODECS = ("h264_v4l2m2m", "h264_omx")
+
+
+def _list_frames(photos_dir: Path) -> list[Path]:
+    """JPEGs in photos_dir, sorted by name (timestamp-based → chronological)."""
+    return sorted(
+        (f for f in photos_dir.iterdir() if f.suffix.lower() in (".jpg", ".jpeg")),
+        key=lambda p: p.name,
+    )
 
 
 def _parse_frame_ts(path: Path) -> Optional[datetime]:
@@ -61,6 +77,7 @@ class VideoGenerator:
         self._cfg = config
         self._state = state
         self._lock = threading.Lock()  # one generation at a time
+        self._last_failure: Optional[float] = None  # time.monotonic() of last failure
 
     # ── public API ─────────────────────────────────────────────────────────
 
@@ -74,12 +91,29 @@ class VideoGenerator:
             return None
 
         try:
-            return self._do_generate()
+            result = self._do_generate()
+        except Exception:
+            self._last_failure = time.monotonic()
+            raise
         finally:
             self._lock.release()
+        self._last_failure = None if result else time.monotonic()
+        return result
 
     def generate_async(self) -> None:
-        """Fire-and-forget wrapper; exceptions are caught and logged."""
+        """Fire-and-forget wrapper; exceptions are caught and logged.
+
+        Skipped while a recent failure is cooling down (see RETRY_COOLDOWN_S).
+        """
+        if self._last_failure is not None:
+            elapsed = time.monotonic() - self._last_failure
+            if elapsed < RETRY_COOLDOWN_S:
+                logger.debug(
+                    "Video generation failed %.0f s ago — retrying after %d s.",
+                    elapsed,
+                    RETRY_COOLDOWN_S,
+                )
+                return
         t = threading.Thread(target=self._safe_generate, name="video-gen", daemon=True)
         t.start()
 
@@ -100,11 +134,7 @@ class VideoGenerator:
         videos_dir = self._cfg.videos_path
         videos_dir.mkdir(parents=True, exist_ok=True)
 
-        # Collect frames sorted by name (which is timestamp-based → chronological)
-        frames = sorted(
-            [f for f in photos_dir.iterdir() if f.suffix.lower() in (".jpg", ".jpeg")],
-            key=lambda p: p.name,
-        )
+        frames = _list_frames(photos_dir)
 
         if len(frames) < 2:
             logger.warning("Not enough frames (%d) to generate video.", len(frames))
@@ -142,10 +172,15 @@ class VideoGenerator:
             return None
 
         logger.info("Video generated: %s", output_path)
-        self._state.record_video()
 
         # Handle source photos
         self._handle_source_photos(frames, stem)
+
+        # Photos captured during the encode weren't in this video; they start
+        # the next batch instead of being silently dropped from the count.
+        last_name = frames[-1].name
+        carry_over = sum(1 for f in _list_frames(photos_dir) if f.name > last_name)
+        self._state.record_video(carry_over=carry_over)
 
         # If repeat=False, mark profile as completed
         if not self._cfg.video.repeat:
@@ -162,7 +197,7 @@ class VideoGenerator:
             "-safe", "0",
             "-i", str(list_file),
             "-c:v", self._cfg.video.video_codec,
-            "-crf", str(self._cfg.video.crf),
+            *self._rate_control_args(),
             "-r", str(self._cfg.video.fps),    # constant frame rate (QuickTime compat)
             "-pix_fmt", "yuv420p",             # broad player compatibility
             "-movflags", "+faststart",         # moov atom at front (QuickTime / web)
@@ -187,6 +222,11 @@ class VideoGenerator:
         except Exception as exc:
             logger.error("ffmpeg error: %s", exc)
             return False
+
+    def _rate_control_args(self) -> list[str]:
+        if self._cfg.video.video_codec in _BITRATE_CODECS:
+            return ["-b:v", self._cfg.video.bitrate]
+        return ["-crf", str(self._cfg.video.crf)]
 
     def _handle_source_photos(self, frames: list[Path], video_stem: str) -> None:
         action = self._cfg.video.after_video

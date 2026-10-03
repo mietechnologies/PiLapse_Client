@@ -134,11 +134,16 @@ class ProfileState:
         with self._lock:
             return self._get("video_count", 0)
 
-    def record_video(self) -> None:
+    def record_video(self, carry_over: int = 0) -> None:
+        """Record a generated video.
+
+        `carry_over` is the number of photos captured while the video was being
+        generated; they were not in it, so they start the next batch.
+        """
         with self._lock:
             self._ensure_loaded()
             self._data["video_count"] = self._data.get("video_count", 0) + 1
-            self._data["current_batch"] = 0
+            self._data["current_batch"] = max(0, carry_over)
             self._save()
 
     # ── solar cache ────────────────────────────────────────────────────────

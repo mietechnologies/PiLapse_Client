@@ -145,6 +145,15 @@ class VideoConfig(BaseModel):
     # ffmpeg video codec for output (libx264 is universally compatible)
     video_codec: str = "libx264"
     crf: int = Field(23, ge=0, le=51)  # quality; lower = better, larger file
+    # Hardware encoders (h264_v4l2m2m) ignore crf and need a target bitrate
+    bitrate: str = "8M"
+
+    @field_validator("bitrate")
+    @classmethod
+    def valid_bitrate(cls, v: str) -> str:
+        if not re.match(r"^\d+[kKmM]?$", v):
+            raise ValueError("bitrate must be e.g. '8M', '4000k'")
+        return v
 
 
 # ─── streaming: web preview ─────────────────────────────────────────────────

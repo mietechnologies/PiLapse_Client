@@ -68,7 +68,9 @@ video:
                             # false = stop after the first video, set status=completed
   after_video: move_to_archive   # move_to_archive | delete | keep
   video_codec: libx264      # libx264 (universal) or h264_v4l2m2m (Pi HW)
-  crf: 23                   # Quality (0=lossless, 51=worst). 18-28 is typical.
+  crf: 23                   # Quality (0=lossless, 51=worst). 18-28 is typical. libx264 only.
+  bitrate: "8M"             # Target bitrate for h264_v4l2m2m (which ignores crf).
+                            # h264_v4l2m2m is limited to 1920x1080 frames.
 
 # ─── Streaming ───────────────────────────────────────────────────────────────
 streaming:

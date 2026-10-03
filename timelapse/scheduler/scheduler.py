@@ -40,6 +40,12 @@ CAPTURE_COOLDOWN_S = 60
 # How often the sleep loop wakes to check for shutdown
 SLEEP_TICK_S = 5
 
+# Back-off after a failed capture (camera gone, disk full).  A failure leaves
+# last_capture_at unchanged, so without this an interval schedule would retry
+# immediately in a tight loop.  Doubles per consecutive failure up to the max.
+FAILURE_BACKOFF_BASE_S = 10
+FAILURE_BACKOFF_MAX_S = 300
+
 
 class Scheduler:
     """
@@ -64,6 +70,7 @@ class Scheduler:
         self._tz = local_tz
         self._stop_event = threading.Event()
         self._thread: Optional[threading.Thread] = None
+        self._consecutive_failures = 0
 
     # ── lifecycle ──────────────────────────────────────────────────────────
 
@@ -141,8 +148,20 @@ class Scheduler:
         ok = self._capture_fn()
         if ok:
             logger.info("Capture succeeded.")
+            self._consecutive_failures = 0
         else:
-            logger.warning("Capture reported failure.")
+            self._consecutive_failures += 1
+            backoff = self._failure_backoff_s()
+            logger.warning(
+                "Capture reported failure (%d in a row) — retrying in %d s.",
+                self._consecutive_failures,
+                backoff,
+            )
+            self._interruptible_sleep(backoff)
+
+    def _failure_backoff_s(self) -> int:
+        exp = min(self._consecutive_failures - 1, 16)  # cap the shift; max applies anyway
+        return min(FAILURE_BACKOFF_MAX_S, FAILURE_BACKOFF_BASE_S * 2**exp)
 
     # ── next-time logic ────────────────────────────────────────────────────
 
