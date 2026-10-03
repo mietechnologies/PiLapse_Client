@@ -24,6 +24,7 @@ from timelapse.config.models import (
     DiskConfig,
     GlobalConfig,
     IntervalSchedule,
+    LiveVideoConfig,
     PreviewConfig,
     ProfileConfig,
     RetentionConfig,
@@ -198,44 +199,42 @@ def run_wizard(profile: str = "default") -> None:
     min_free = _prompt("Minimum free disk space to keep (GB)", "3.0")
     disk = DiskConfig(min_free_gb=float(min_free))
 
-    # ── web preview ────────────────────────────────────────────────────────
-    click.echo("\n─── Live preview (web server) ───────────────────────────")
-    preview_enabled = _confirm("Enable live preview web server?", default=True)
-    auth_enabled = False
-    auth = AuthConfig()
-    preview_host = "0.0.0.0"
-    preview_port = 8080
-    preview_mode = "auto"
+    # ── live view ──────────────────────────────────────────────────────────
+    click.echo("\n─── Live view ───────────────────────────────────────────")
+    preview_enabled = _confirm("Enable live view?", default=True)
+    preview = PreviewConfig(enabled=preview_enabled)
 
     if preview_enabled:
-        preview_host = _prompt(
-            "Bind host (0.0.0.0 to expose on LAN; 127.0.0.1 for local only)",
-            "0.0.0.0",
+        click.echo(
+            "  mediamtx: low-latency WebRTC/HLS in any browser, logins handled by\n"
+            "            MediaMTX (install it separately — see README).\n"
+            "  mjpeg:    built-in web server, no extra software, more bandwidth."
         )
-        preview_port_s = _prompt("Port", "8080")
-        preview_port = int(preview_port_s)
-        preview_mode = _choose(
-            "Preview mode",
-            ["auto", "hls", "mjpeg"],
-            "auto",
-        )
-        auth_enabled = _confirm("Enable HTTP Basic Auth for preview?", default=False)
-        if auth_enabled:
-            username = _prompt("Username", "timelapse")
-            pw_env = _prompt("Env var for password", "TIMELAPSE_WEB_PASSWORD")
-            auth = AuthConfig(enabled=True, username=username, password_env=pw_env)
-            click.echo(
-                f"\n  ⚠  Set ${pw_env} in your environment or "
-                "systemd EnvironmentFile.\n"
+        preview_mode = _choose("Live view mode", ["mediamtx", "mjpeg"], "mediamtx")
+        if preview_mode == "mediamtx":
+            preview = PreviewConfig(enabled=True, mode="mediamtx")
+        else:
+            preview_host = _prompt(
+                "Bind host (0.0.0.0 to expose on LAN; 127.0.0.1 for local only)",
+                "0.0.0.0",
             )
-
-    preview = PreviewConfig(
-        enabled=preview_enabled,
-        mode=preview_mode,  # type: ignore[arg-type]
-        host=preview_host,
-        port=preview_port,
-        auth=auth,
-    )
+            preview_port = int(_prompt("Port", "8080"))
+            auth = AuthConfig()
+            if _confirm("Require a login to view? (strongly recommended)", default=True):
+                username = _prompt("Username", "timelapse")
+                pw_env = _prompt("Env var for password", "TIMELAPSE_WEB_PASSWORD")
+                auth = AuthConfig(enabled=True, username=username, password_env=pw_env)
+                click.echo(
+                    f"\n  ⚠  Set ${pw_env} in your environment or systemd EnvironmentFile.\n"
+                    "     The live view will not start without it.\n"
+                )
+            preview = PreviewConfig(
+                enabled=True,
+                mode="mjpeg",
+                host=preview_host,
+                port=preview_port,
+                auth=auth,
+            )
 
     # ── RTMP ──────────────────────────────────────────────────────────────
     click.echo("\n─── RTMP restream (YouTube/Twitch/etc.) ─────────────────")
@@ -244,21 +243,33 @@ def run_wizard(profile: str = "default") -> None:
     if rtmp_enabled:
         rtmp_url = _prompt("RTMP URL", "rtmp://a.rtmp.youtube.com/live2")
         key_env_default = f"TIMELAPSE_RTMP_KEY_{profile.upper()}"
-        key_env = _prompt(f"Env var for stream key", key_env_default)
-        bitrate = _prompt("Video bitrate (e.g. 1000k, 2M)", "1000k")
+        key_env = _prompt("Env var for stream key", key_env_default)
         rtmp = RtmpConfig(
             enabled=True,
             rtmp_url=rtmp_url,
             stream_key_env=key_env,
-            video_bitrate=bitrate,
         )
         click.echo(
             f"\n  ⚠  Set ${key_env} in your environment or systemd EnvironmentFile.\n"
             "  The stream key is NEVER written to disk by this wizard.\n"
         )
 
+    # ── live video quality (shared by live view and RTMP) ─────────────────
+    live_video = LiveVideoConfig()
+    if preview_enabled or rtmp_enabled:
+        click.echo("\n─── Live video quality ──────────────────────────────────")
+        res = _choose("Resolution", ["1280x720", "1920x1080", "854x480"], "1280x720")
+        w, h = (int(x) for x in res.split("x"))
+        if w > capture.width or h > capture.height:
+            # The live stream can't be larger than the still stream (libcamera)
+            w, h = min(w, capture.width), min(h, capture.height)
+            click.echo(f"  Live video capped to the still size: {w}x{h}")
+        fps = int(_prompt("Frame rate (lower = less power/bandwidth)", "15"))
+        bitrate = _prompt("Bitrate (e.g. 1500k, 3M)", "1500k")
+        live_video = LiveVideoConfig(width=w, height=h, fps=fps, bitrate=bitrate)
+
     # ── assemble & save ────────────────────────────────────────────────────
-    streaming = StreamingConfig(preview=preview, rtmp=rtmp)
+    streaming = StreamingConfig(video=live_video, preview=preview, rtmp=rtmp)
     profile_cfg = ProfileConfig(
         photos_dir=photos_dir,
         videos_dir=videos_dir,

@@ -8,6 +8,7 @@ Paths:
 
 from __future__ import annotations
 
+import logging
 import shutil
 from pathlib import Path
 from typing import Optional
@@ -15,7 +16,9 @@ from typing import Optional
 import yaml
 from pydantic import ValidationError
 
-from timelapse.config.models import GlobalConfig, ProfileConfig
+from timelapse.config.models import GlobalConfig, ProfileConfig, unknown_keys
+
+logger = logging.getLogger(__name__)
 
 # ─── paths ──────────────────────────────────────────────────────────────────
 
@@ -90,6 +93,8 @@ def load_profile_config(profile: str = DEFAULT_PROFILE) -> ProfileConfig:
         raise ConfigError(
             f"Profile '{profile}' config validation failed ({path}):\n{exc}"
         ) from exc
+    for key in unknown_keys(ProfileConfig, data):
+        logger.warning("Ignoring unknown setting '%s' in %s", key, path)
     return cfg.resolve_dirs(profile)
 
 
@@ -150,6 +155,10 @@ def validate_config(profile: str = DEFAULT_PROFILE) -> list[str]:
         cfg = load_profile_config(profile)
         # Extra semantic checks
         errors.extend(_semantic_checks(cfg, profile))
+        errors.extend(
+            f"Unknown setting '{key}' is ignored (typo, or removed in this version?)"
+            for key in unknown_keys(ProfileConfig, _load_yaml(profile_config_path(profile)))
+        )
     except ConfigError as e:
         errors.append(str(e))
 
@@ -160,13 +169,18 @@ def _semantic_checks(cfg: ProfileConfig, profile: str) -> list[str]:
     """Business-logic checks beyond pydantic field validation."""
     issues: list[str] = []
 
-    # Check that HLS/RTMP won't conflict with preview mode
-    if cfg.streaming.rtmp.enabled and cfg.streaming.preview.enabled:
-        if cfg.streaming.preview.mode == "hls":
-            issues.append(
-                "Warning: running both HLS preview and RTMP simultaneously is very "
-                "CPU-intensive on Pi Zero W. Consider MJPEG preview or disabling one."
-            )
+    # Unauthenticated camera on the network
+    preview = cfg.streaming.preview
+    if (
+        preview.enabled
+        and preview.mode == "mjpeg"
+        and not preview.auth.enabled
+        and preview.host not in ("127.0.0.1", "localhost", "::1")
+    ):
+        issues.append(
+            f"Warning: the MJPEG preview listens on {preview.host} without a login — "
+            "anyone on the network can watch. Enable streaming.preview.auth."
+        )
 
     # Solar schedule needs lat/lon
     from timelapse.config.models import SolarSchedule

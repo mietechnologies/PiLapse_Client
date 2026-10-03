@@ -13,8 +13,11 @@ archive_dir: "~/timelapse/default/archive"
 
 # ─── Camera / still capture ──────────────────────────────────────────────────
 capture:
-  width: 1920          # Max: 4056 (IMX477), 3280 (IMX219), 2592 (IMX708)
+  width: 1920          # Max: 4056 (IMX477), 3280 (IMX219), 4608 (IMX708)
   height: 1080
+  # The camera keeps 4 buffers of width x height x 1.5 bytes reserved while
+  # running (~3 MB each at 1920x1080, ~18 MB at 4056x3040).  On a 512 MB
+  # Pi Zero 2 W, if the camera fails to start at a large size, reduce it.
   jpeg_quality: 85     # 1-100; 85 is a good balance for storage vs quality
   capture_timeout_s: 10
 
@@ -73,40 +76,46 @@ video:
                             # h264_v4l2m2m is limited to 1920x1080 frames.
 
 # ─── Streaming ───────────────────────────────────────────────────────────────
+# Live video is encoded ONCE by the Pi's hardware H.264 encoder and shared by
+# every live output (live view and RTMP), so adding outputs costs network
+# bandwidth, not CPU.
 streaming:
 
-  # Live preview web server
+  # Shared live video settings
+  video:
+    width: 1280            # Max 1920x1080 (hardware encoder limit), and no
+    height: 720            # larger than capture.width x capture.height
+    fps: 15                # Lower = less power, heat and bandwidth
+    bitrate: "1500k"       # 1500k is plenty for 720p15; ~3M for 1080p30
+    keyframe_interval_s: 2 # Viewers can only join on a keyframe
+
+  # Live view
   preview:
     enabled: true
-    # auto: MJPEG on Pi Zero W, HLS on Zero 2 W / better
-    # Force with: mjpeg | hls
-    mode: auto
-    host: "127.0.0.1"     # IMPORTANT: 127.0.0.1 = local only (recommended)
-                           # Use Tailscale / Cloudflare Tunnel for internet access
-                           # See README § Secure internet access
+    # mediamtx: publish to a local MediaMTX server, which serves viewers over
+    #           WebRTC (sub-second latency, any browser), HLS and RTSP, and
+    #           handles logins.  Recommended.  See README § Live view.
+    # mjpeg:    built-in web server; no extra software, but much more
+    #           bandwidth per viewer and no WebRTC.
+    mode: mediamtx
+
+    # mediamtx mode: where to publish.  {profile} becomes the profile name,
+    # so viewers open http://<pi>:8889/<profile>/ for WebRTC.
+    publish_url: "rtsp://127.0.0.1:8554/{profile}"
+
+    # mjpeg mode only:
+    host: "0.0.0.0"        # 0.0.0.0 = whole LAN; 127.0.0.1 = this Pi only
     port: 8080
-
-    # HLS-specific settings (Pi Zero 2 W or better)
-    hls_width: 1280
-    hls_height: 720
-    hls_fps: 15
-    hls_segment_seconds: 2
-    hls_list_size: 5
-
-    # MJPEG-specific settings (Pi Zero W)
-    mjpeg_width: 640
-    mjpeg_height: 360
-    mjpeg_fps: 1.0
-
-    # Optional HTTP Basic Auth
+    mjpeg_fps: 5.0         # Per-viewer frame cap
     auth:
-      enabled: false
+      enabled: true        # The server refuses to start if the password is unset
       username: "timelapse"
       # Password comes from this env var — NEVER store plaintext here
       password_env: "TIMELAPSE_WEB_PASSWORD"
 
-  # RTMP restream (YouTube / Twitch / etc.)
-  # NOT supported on Pi Zero W.
+  # RTMP push (YouTube / Twitch / Rumble / your own server)
+  # For several platforms at once, push once to your server and fan out
+  # from there — the Pi's Wi-Fi and your upload bandwidth are the limit.
   rtmp:
     enabled: false
     rtmp_url: "rtmp://a.rtmp.youtube.com/live2"
@@ -114,8 +123,4 @@ streaming:
     stream_key_env: "TIMELAPSE_RTMP_KEY_DEFAULT"
     # Optional: read from secrets file instead of env var
     # secrets_file: "~/.config/timelapse/secrets/default.env"
-    video_bitrate: "1000k"   # 1000k–2500k for YouTube; 500k–3500k for Twitch
-    audio_enabled: false
-    width: 1280
-    height: 720
-    fps: 30
+    silent_audio: true     # YouTube rejects video-only streams

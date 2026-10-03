@@ -151,12 +151,53 @@ class VideoConfig(BaseModel):
     @field_validator("bitrate")
     @classmethod
     def valid_bitrate(cls, v: str) -> str:
-        if not re.match(r"^\d+[kKmM]?$", v):
-            raise ValueError("bitrate must be e.g. '8M', '4000k'")
+        parse_bitrate(v)
         return v
 
 
-# ─── streaming: web preview ─────────────────────────────────────────────────
+# ─── streaming: shared live video ───────────────────────────────────────────
+
+
+class LiveVideoConfig(BaseModel):
+    """
+    The one hardware H.264 encode that every live output shares.
+
+    The camera's low-res stream is encoded once at these settings; the
+    MediaMTX publish and the RTMP push both copy that same bitstream, so
+    adding outputs costs network bandwidth, not encoder time.
+    """
+
+    # The Pi's hardware H.264 encoder tops out at 1080p.  Must also be no
+    # larger than capture.width x capture.height (the still stream).
+    width: int = Field(1280, ge=320, le=1920)
+    height: int = Field(720, ge=240, le=1080)
+    fps: int = Field(15, ge=1, le=30)
+    bitrate: str = "1500k"
+    # Seconds between keyframes: viewers (and HLS segments) can only start
+    # on a keyframe, so this bounds join latency.
+    keyframe_interval_s: int = Field(2, ge=1, le=10)
+
+    @field_validator("bitrate")
+    @classmethod
+    def valid_bitrate(cls, v: str) -> str:
+        parse_bitrate(v)
+        return v
+
+    @property
+    def bitrate_bps(self) -> int:
+        return parse_bitrate(self.bitrate)
+
+
+def parse_bitrate(value: str) -> int:
+    """Parse '1500k' / '2M' / '800000' → bits per second."""
+    m = re.match(r"^(\d+)([kKmM]?)$", value.strip())
+    if not m:
+        raise ValueError(f"Invalid bitrate '{value}'. Use e.g. '1500k' or '2M'.")
+    n, unit = int(m.group(1)), m.group(2).lower()
+    return n * {"": 1, "k": 1_000, "m": 1_000_000}[unit]
+
+
+# ─── streaming: live view ───────────────────────────────────────────────────
 
 
 class AuthConfig(BaseModel):
@@ -168,21 +209,33 @@ class AuthConfig(BaseModel):
 
 class PreviewConfig(BaseModel):
     enabled: bool = True
-    # auto: use HLS on Pi Zero 2 W or better; fall back to MJPEG on Zero W
-    mode: Literal["auto", "hls", "mjpeg"] = "auto"
+    # mediamtx: publish to a MediaMTX server, which serves WebRTC / HLS / RTSP
+    #           to viewers and handles their logins (recommended).
+    # mjpeg:    built-in MJPEG web server — no extra software, higher bandwidth.
+    mode: Literal["mediamtx", "mjpeg"] = "mediamtx"
+
+    # mediamtx mode: where to publish.  {profile} is replaced at runtime.
+    publish_url: str = "rtsp://127.0.0.1:8554/{profile}"
+
+    # mjpeg mode: built-in server
     host: str = "0.0.0.0"
     port: int = Field(8080, ge=1024, le=65535)
     auth: AuthConfig = Field(default_factory=AuthConfig)
-    # HLS-specific (Pi Zero 2 W / better)
-    hls_width: int = Field(1280, ge=320)
-    hls_height: int = Field(720, ge=240)
-    hls_fps: int = Field(15, ge=1, le=30)
-    hls_segment_seconds: int = Field(2, ge=1, le=10)
-    hls_list_size: int = Field(5, ge=2, le=20)
-    # MJPEG-specific (Pi Zero W fallback)
-    mjpeg_width: int = Field(640, ge=160)
-    mjpeg_height: int = Field(360, ge=120)
-    mjpeg_fps: float = Field(1.0, ge=0.1, le=10.0)
+    # Cap on frames sent to each MJPEG client (the encoder runs at video.fps)
+    mjpeg_fps: float = Field(5.0, ge=0.1, le=30.0)
+
+    @field_validator("mode", mode="before")
+    @classmethod
+    def map_legacy_modes(cls, v):
+        # 'auto' and 'hls' predate MediaMTX; MediaMTX serves HLS itself.
+        return "mediamtx" if v in ("auto", "hls") else v
+
+    @field_validator("publish_url")
+    @classmethod
+    def must_be_rtsp(cls, v: str) -> str:
+        if not (v.startswith("rtsp://") or v.startswith("rtsps://")):
+            raise ValueError("publish_url must start with rtsp:// or rtsps://")
+        return v
 
 
 # ─── streaming: RTMP ────────────────────────────────────────────────────────
@@ -195,11 +248,9 @@ class RtmpConfig(BaseModel):
     stream_key_env: str = "TIMELAPSE_RTMP_KEY_DEFAULT"
     # Optional secrets file path (alternative to env var; must be chmod 0600)
     secrets_file: Optional[str] = None
-    video_bitrate: str = "1000k"
-    audio_enabled: bool = False
-    width: int = Field(1280, ge=320)
-    height: int = Field(720, ge=240)
-    fps: int = Field(30, ge=1, le=60)
+    # YouTube (and some other ingests) refuse video-only streams; this adds
+    # a silent AAC track.  Costs very little CPU.
+    silent_audio: bool = True
 
     @field_validator("rtmp_url")
     @classmethod
@@ -208,17 +259,16 @@ class RtmpConfig(BaseModel):
             raise ValueError("rtmp_url must start with rtmp:// or rtmps://")
         return v
 
-    @field_validator("video_bitrate")
-    @classmethod
-    def valid_bitrate(cls, v: str) -> str:
-        if not re.match(r"^\d+[kKmM]?$", v):
-            raise ValueError("video_bitrate must be e.g. '1000k', '2M'")
-        return v
-
 
 class StreamingConfig(BaseModel):
+    video: LiveVideoConfig = Field(default_factory=LiveVideoConfig)
     preview: PreviewConfig = Field(default_factory=PreviewConfig)
     rtmp: RtmpConfig = Field(default_factory=RtmpConfig)
+
+    @property
+    def needs_h264(self) -> bool:
+        p = self.preview
+        return (p.enabled and p.mode == "mediamtx") or self.rtmp.enabled
 
 
 # ─── top-level profile config ────────────────────────────────────────────────
@@ -237,8 +287,15 @@ class ProfileConfig(BaseModel):
     streaming: StreamingConfig = Field(default_factory=StreamingConfig)
 
     @model_validator(mode="after")
-    def validate_rtmp_key_env_name(self) -> "ProfileConfig":
-        """Warn if RTMP env var name still uses the placeholder profile name."""
+    def stream_fits_in_still(self) -> "ProfileConfig":
+        # The live stream is the camera's "lores" output, which libcamera
+        # requires to be no larger than the "main" (still) output.
+        v, c = self.streaming.video, self.capture
+        if v.width > c.width or v.height > c.height:
+            raise ValueError(
+                f"streaming.video ({v.width}x{v.height}) must not exceed "
+                f"capture size ({c.width}x{c.height})"
+            )
         return self
 
     def resolve_dirs(self, profile_name: str) -> "ProfileConfig":
@@ -275,3 +332,28 @@ class GlobalConfig(BaseModel):
     @property
     def log_path(self) -> Path:
         return Path(self.log_dir).expanduser()
+
+
+# ─── unknown-key detection ──────────────────────────────────────────────────
+
+
+def unknown_keys(model: type[BaseModel], data: object, prefix: str = "") -> list[str]:
+    """
+    Dotted paths of keys in `data` that `model` does not define.
+
+    Pydantic ignores unknown keys, which silently drops typos and settings
+    from older versions; the loader uses this to warn about them.
+    """
+    if not isinstance(data, dict):
+        return []
+    found: list[str] = []
+    for key, value in data.items():
+        field = model.model_fields.get(key)
+        path = f"{prefix}{key}"
+        if field is None:
+            found.append(path)
+            continue
+        sub = field.annotation
+        if isinstance(sub, type) and issubclass(sub, BaseModel):
+            found.extend(unknown_keys(sub, value, prefix=f"{path}."))
+    return found

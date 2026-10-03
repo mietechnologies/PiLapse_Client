@@ -113,7 +113,7 @@ def run(ctx: click.Context, no_preview: bool, no_rtmp: bool) -> None:
         state.reset()
 
     # ── camera ────────────────────────────────────────────────────────────
-    from timelapse.capture.camera import check_camera_available, create_camera
+    from timelapse.capture.camera import check_camera_available
 
     avail, msg = check_camera_available()
     if not avail:
@@ -121,15 +121,8 @@ def run(ctx: click.Context, no_preview: bool, no_rtmp: bool) -> None:
         if not click.confirm("Continue with MockCamera (for testing)?", default=False):
             sys.exit(1)
 
-    cam = create_camera(
-        still_width=prof_cfg.capture.width,
-        still_height=prof_cfg.capture.height,
-        preview_width=prof_cfg.streaming.preview.mjpeg_width,
-        preview_height=prof_cfg.streaming.preview.mjpeg_height,
-        jpeg_quality=prof_cfg.capture.jpeg_quality,
-        preview_fps=prof_cfg.streaming.preview.mjpeg_fps,
-    )
-    cam.start()
+    cam = _make_camera(prof_cfg)
+    _start_camera_or_exit(cam)
 
     # ── disk guard ────────────────────────────────────────────────────────
     from timelapse.disk.guard import DiskGuard
@@ -159,16 +152,17 @@ def run(ctx: click.Context, no_preview: bool, no_rtmp: bool) -> None:
     )
 
     # ── streaming ─────────────────────────────────────────────────────────
-    from timelapse.streaming.webserver import StreamingController
+    from timelapse.streaming.controller import StreamingController
 
     stream_ctrl = StreamingController(prof_cfg, cam, profile)
     if no_preview:
-        click.echo("Preview disabled via --no-preview.")
-    else:
-        try:
-            stream_ctrl.start()
-        except Exception as exc:
-            logger.warning("Streaming failed to start: %s — capture continues.", exc)
+        click.echo("Live view disabled via --no-preview.")
+    if no_rtmp:
+        click.echo("RTMP disabled via --no-rtmp.")
+    try:
+        stream_ctrl.start(preview=not no_preview, rtmp=not no_rtmp)
+    except Exception as exc:
+        logger.warning("Streaming failed to start: %s — capture continues.", exc)
 
     # ── scheduler ─────────────────────────────────────────────────────────
     from timelapse.scheduler.scheduler import Scheduler
@@ -291,7 +285,7 @@ def snapshot(ctx: click.Context, output: Optional[str]) -> None:
     profile = ctx.obj["profile"]
     _check_setup_or_exit(profile)
 
-    from timelapse.capture.camera import create_camera, check_camera_available
+    from timelapse.capture.camera import check_camera_available
     from timelapse.config.loader import load_profile_config
 
     prof_cfg = load_profile_config(profile)
@@ -306,16 +300,10 @@ def snapshot(ctx: click.Context, output: Optional[str]) -> None:
         ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
         out_path = Path.home() / "timelapse" / f"snapshot_{ts}.jpg"
 
-    cam = create_camera(
-        still_width=prof_cfg.capture.width,
-        still_height=prof_cfg.capture.height,
-    )
-    cam.start()
+    cam = _make_camera(prof_cfg)
+    _start_camera_or_exit(cam)
     try:
-        from timelapse.capture.pipeline import CapturePipeline
-
-        # Use pipeline.snapshot for proper path handling
-        ok = cam.capture_still(out_path)
+        ok = cam.capture_still(out_path, timeout_s=prof_cfg.capture.capture_timeout_s)
         if ok:
             click.echo(f"Snapshot saved: {out_path}")
         else:
@@ -407,6 +395,34 @@ def config_show(ctx: click.Context) -> None:
 
 
 # ─── helpers ─────────────────────────────────────────────────────────────────
+
+
+def _make_camera(prof_cfg):
+    from timelapse.capture.camera import create_camera
+
+    live = prof_cfg.streaming.video
+    return create_camera(
+        still_width=prof_cfg.capture.width,
+        still_height=prof_cfg.capture.height,
+        stream_width=live.width,
+        stream_height=live.height,
+        stream_fps=live.fps,
+        jpeg_quality=prof_cfg.capture.jpeg_quality,
+    )
+
+
+def _start_camera_or_exit(cam) -> None:
+    try:
+        cam.start()
+    except Exception as exc:
+        click.echo(
+            f"Could not start the camera: {exc}\n"
+            "Only one process can use the camera. If the timelapse service is "
+            "running, stop it first (sudo systemctl stop 'timelapse@*') or grab "
+            "a frame from its live view instead.",
+            err=True,
+        )
+        sys.exit(1)
 
 
 def _check_setup_or_exit(profile: str) -> None:

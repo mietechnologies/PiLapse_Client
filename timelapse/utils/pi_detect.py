@@ -1,10 +1,7 @@
 """
 Raspberry Pi model detection.
 
-Used to choose the appropriate streaming backend:
-  Pi Zero W   → MJPEG only (single-core 1 GHz, 512 MB)
-  Pi Zero 2 W → HLS optional (quad-core 1 GHz, 512 MB)
-  Pi 3/4/5    → HLS + RTMP fully supported
+Used to print hardware-specific guidance at startup.
 """
 
 from __future__ import annotations
@@ -59,26 +56,22 @@ def get_tier() -> str:
 PERFORMANCE_NOTES = {
     "zero_w": (
         "Pi Zero W (single-core ARMv6 @ 1 GHz, 512 MB RAM):\n"
-        "  - Still capture: ✓ Full 1920×1080 JPEG via picamera2\n"
-        "  - MJPEG preview: ✓ 640×360 @ 1–2 fps (CPU ~15–25%)\n"
-        "  - HLS preview:   ✗ Too heavy — software H.264 encoding saturates CPU\n"
-        "  - RTMP stream:   ✗ Not feasible at any useful quality\n"
-        "  - Video gen:     ✓ ffmpeg (runs as low-priority batch after threshold)\n"
-        "  Tip: schedule video generation at night; use --nice 19.\n"
+        "  - Untested. Live video uses the hardware encoders, but Python and\n"
+        "    picamera2 themselves are heavy for one ARMv6 core.\n"
+        "  - Prefer long capture intervals and preview.mode=mjpeg.\n"
     ),
     "zero_2w": (
         "Pi Zero 2 W (quad-core Cortex-A53 @ 1 GHz, 512 MB RAM):\n"
-        "  - Still capture: ✓ Full 1920×1080 JPEG via picamera2\n"
-        "  - MJPEG preview: ✓ Easy\n"
-        "  - HLS preview:   ✓ 1280×720 @ 15 fps with h264_v4l2m2m HW encoder\n"
-        "  - RTMP stream:   ⚠  Possible at 720p + low bitrate; monitor CPU temp\n"
-        "  - Video gen:     ✓ ffmpeg in batch mode\n"
-        "  Tip: avoid running HLS preview + RTMP simultaneously.\n"
+        "  - Live video: one hardware H.264 encode shared by all outputs.\n"
+        "    720p @ 15 fps is the recommended starting point.\n"
+        "  - Wi-Fi is usually the bottleneck: disable power saving\n"
+        "    (sudo iw wlan0 set power_save off) if the stream stalls.\n"
+        "  - Use a heatsink; check throttling with: vcgencmd get_throttled\n"
     ),
     "capable": (
-        "Pi 3 / 4 / 5:\n"
-        "  - All features supported at full quality.\n"
-        "  - RTMP at 1080p / 30 fps is feasible on Pi 4/5.\n"
+        "Pi 3 / 4:\n"
+        "  - All features supported; 1080p @ 30 fps live video is feasible.\n"
+        "Pi 5 has no hardware H.264 encoder: picamera2 encodes in software (uses CPU).\n"
     ),
     "unknown": (
         "Non-Pi or unknown hardware:\n"

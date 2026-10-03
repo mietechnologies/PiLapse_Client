@@ -175,13 +175,66 @@ class TestRtmpConfig:
         with pytest.raises(ValidationError):
             RtmpConfig(rtmp_url="http://example.com/stream")
 
-    def test_valid_bitrate(self):
-        r = RtmpConfig(video_bitrate="2M")
-        assert r.video_bitrate == "2M"
+    def test_silent_audio_default_on(self):
+        assert RtmpConfig().silent_audio is True
+
+
+# ─── Live video / preview ─────────────────────────────────────────────────────
+
+
+class TestLiveVideoConfig:
+    @pytest.mark.parametrize("value, bps", [("1500k", 1_500_000), ("2M", 2_000_000), ("800000", 800_000)])
+    def test_bitrate_parsing(self, value, bps):
+        from timelapse.config.models import LiveVideoConfig
+
+        assert LiveVideoConfig(bitrate=value).bitrate_bps == bps
 
     def test_invalid_bitrate(self):
+        from timelapse.config.models import LiveVideoConfig
+
         with pytest.raises(ValidationError):
-            RtmpConfig(video_bitrate="high")
+            LiveVideoConfig(bitrate="high")
+
+    def test_rejects_beyond_hardware_encoder(self):
+        from timelapse.config.models import LiveVideoConfig
+
+        with pytest.raises(ValidationError):
+            LiveVideoConfig(width=2560, height=1440)
+
+    def test_stream_must_fit_inside_still(self):
+        with pytest.raises(ValidationError, match="must not exceed capture size"):
+            ProfileConfig.model_validate(
+                {"capture": {"width": 1280, "height": 720},
+                 "streaming": {"video": {"width": 1920, "height": 1080}}}
+            )
+
+    @pytest.mark.parametrize("legacy", ["auto", "hls"])
+    def test_legacy_preview_modes_map_to_mediamtx(self, legacy):
+        from timelapse.config.models import PreviewConfig
+
+        assert PreviewConfig(mode=legacy).mode == "mediamtx"
+
+    def test_publish_url_must_be_rtsp(self):
+        from timelapse.config.models import PreviewConfig
+
+        with pytest.raises(ValidationError):
+            PreviewConfig(publish_url="http://127.0.0.1:8888/cam")
+
+
+class TestUnknownKeys:
+    def test_reports_nested_legacy_and_typo_keys(self):
+        from timelapse.config.models import unknown_keys
+
+        data = {
+            "capture": {"width": 1920, "jpg_quality": 80},
+            "streaming": {"preview": {"hls_width": 1280}, "rtmp": {"video_bitrate": "1M"}},
+            "schedule": {"mode": "interval", "interval": "5m"},
+        }
+        assert unknown_keys(ProfileConfig, data) == [
+            "capture.jpg_quality",
+            "streaming.preview.hls_width",
+            "streaming.rtmp.video_bitrate",
+        ]
 
 
 # ─── ProfileConfig ────────────────────────────────────────────────────────────

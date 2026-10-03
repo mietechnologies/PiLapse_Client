@@ -6,6 +6,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed — live streaming rebuilt (breaking config changes)
+- Live video is now encoded ONCE by the Pi's hardware H.264 encoder and shared by every output (live view, RTMP). Previously each output started its own encoder, and the configured resolution, fps and bitrate were ignored (the stream was always 640×360 at 1 Mbps).
+- New `streaming.video` section (`width`, `height`, `fps`, `bitrate`, `keyframe_interval_s`) controls that shared encode. Must not exceed the still size or 1920×1080.
+- Live view now publishes to [MediaMTX](https://github.com/bluenviron/mediamtx) (`preview.mode: mediamtx`, the new default), which serves viewers over WebRTC (sub-second latency), HLS and RTSP and handles their logins. `deploy/mediamtx.yml` is a locked-down config: only the Pi may publish, viewers must log in. Legacy `auto`/`hls` modes map to `mediamtx`.
+- The hand-written HLS server and RTMP module are removed (`timelapse/streaming/hls.py`, `rtmp.py`); `webserver.py` is now `controller.py`.
+- MJPEG mode uses the hardware MJPEG encoder, which runs only while someone is watching. The old preview thread converted a full 1080p RGB frame to JPEG in Python continuously — even in HLS mode with no viewers.
+- RTMP adds a silent AAC track by default (`rtmp.silent_audio`); YouTube rejects video-only streams. `rtmp.width/height/fps/video_bitrate/audio_enabled` are replaced by `streaming.video` and `silent_audio`.
+- ffmpeg outputs restart automatically with back-off when ffmpeg exits (network drop, MediaMTX restart), never block the camera's encoder thread (frames are dropped and resume at a keyframe), and receive the camera's real frame timestamps (IVF framing) instead of arrival-time stamps, which produced non-monotonic timestamps on RTMP.
+- Camera streams are YUV420 instead of RGB888, halving reserved camera memory; buffers reduced from 6 to 4. Stills are JPEG-encoded straight from the YUV planes and written atomically.
+- `capture.jpeg_quality` and `capture.capture_timeout_s` are now honored (both were ignored). A timed-out capture no longer leaks a camera buffer.
+- Stopping one encoder no longer stops every encoder (picamera2's `stop_encoder()` with no argument stops all of them).
+- Unknown config keys (typos, removed settings) are now reported as warnings on load and by `timelapse config validate`.
+- Setup wizard asks for live view mode, defaults MJPEG to requiring a login, and asks for live video quality.
+
+### Fixed
+- timelapse/cli.py: `--no-rtmp` was accepted but ignored, and `--no-preview` also disabled RTMP.
+- timelapse/cli.py: `timelapse snapshot` while the service is running now explains that the camera is in use instead of failing with a libcamera error.
+
 ### Security
 - timelapse/streaming/hls.py: Fixed path traversal in the HLS file server — `GET /hls/../../<path>` returned any file readable by the service user. Only bare `.m3u8`/`.ts` filenames inside the segment directory are now served.
 - timelapse/streaming/webserver.py: Preview server now refuses to start when auth is enabled but the password variable is unset (previously it silently served unauthenticated), and warns when serving on a non-loopback address without auth.

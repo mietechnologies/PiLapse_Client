@@ -1,0 +1,47 @@
+# MediaMTX configuration for PiLapse
+# Install to: /usr/local/etc/mediamtx.yml  (see README § Live view)
+#
+# PiLapse publishes the camera's hardware-encoded H.264 here over RTSP from
+# localhost.  MediaMTX then serves it to viewers:
+#
+#   WebRTC (browser, sub-second latency)  http://<pi>:8889/<profile>/
+#   HLS    (browser, a few seconds behind) http://<pi>:8888/<profile>/
+#   RTSP   (VLC, Frigate, Home Assistant)  rtsp://<pi>:8554/<profile>
+#
+# Unlisted settings use MediaMTX's defaults.
+
+logLevel: info
+
+# ─── Who may do what ──────────────────────────────────────────────────────────
+# MediaMTX's own default lets ANYONE publish and watch.  Here only processes
+# on this Pi may publish, and viewers must log in.
+authMethod: internal
+authInternalUsers:
+  # The PiLapse service, publishing from this Pi
+  - user: any
+    pass:
+    ips: ["127.0.0.1", "::1"]
+    permissions:
+      - action: publish
+      - action: api
+
+  # Viewer login.  Replace REPLACE_WITH_HASH with the hash of your password:
+  #   echo -n 'your-password' | openssl dgst -binary -sha256 | openssl base64
+  # and keep the "sha256:" prefix.  (MediaMTX also accepts "argon2:" hashes.)
+  - user: viewer
+    pass: "sha256:REPLACE_WITH_HASH"
+    permissions:
+      - action: read
+
+# ─── Protocols ────────────────────────────────────────────────────────────────
+rtsp: true      # PiLapse publishes over this; also for NVRs / VLC
+webrtc: true    # Browser live view.  Needs UDP 8189 reachable from viewers.
+hls: true       # Browser fallback where WebRTC is blocked
+rtmp: false     # Not needed: PiLapse pushes RTMP to platforms itself
+srt: false
+api: false      # Enable (localhost only, per the rule above) for health checks
+metrics: false
+playback: false
+
+paths:
+  all_others:
