@@ -80,10 +80,17 @@ def run(ctx: click.Context, no_preview: bool, no_rtmp: bool) -> None:
     _os.environ.setdefault("LIBCAMERA_LOG_LEVELS", "*:WARNING")
 
     from timelapse.config.loader import load_global_config, load_profile_config
-    from timelapse.config.models import SolarSchedule
+    from timelapse.scheduler.rules import validate_schedule
 
     glob_cfg = load_global_config()
     prof_cfg = load_profile_config(profile)
+    location = prof_cfg.location or glob_cfg.location
+
+    problems = validate_schedule(prof_cfg.schedule, location)
+    if problems:
+        for p in problems:
+            click.echo(f"✗ {p}", err=True)
+        sys.exit(1)
 
     # ── logging ────────────────────────────────────────────────────────────
     from timelapse.utils.log import setup_logging
@@ -150,12 +157,18 @@ def run(ctx: click.Context, no_preview: bool, no_rtmp: bool) -> None:
     # ── capture pipeline ──────────────────────────────────────────────────
     from timelapse.capture.pipeline import CapturePipeline
 
+    from timelapse.weather import WeatherRecorder
+
+    weather = WeatherRecorder(glob_cfg.weather, location)
+    weather.start()
+
     pipeline = CapturePipeline(
         config=prof_cfg,
         state=state,
         camera=cam,
         disk_guard=disk_guard,
         video_trigger_fn=video_gen.generate_async,
+        weather=weather,
     )
 
     # ── streaming ─────────────────────────────────────────────────────────
@@ -171,13 +184,11 @@ def run(ctx: click.Context, no_preview: bool, no_rtmp: bool) -> None:
             logger.warning("Streaming failed to start: %s — capture continues.", exc)
 
     # ── scheduler ─────────────────────────────────────────────────────────
-    from timelapse.scheduler.scheduler import Scheduler
+    from timelapse.scheduler.scheduler import Intent, Scheduler
 
     scheduler = Scheduler(
-        profile=profile,
-        config=prof_cfg,
-        state=state,
-        capture_fn=pipeline,
+        intents=[Intent(profile, prof_cfg.schedule, state, location)],
+        on_due=lambda intents, slot: pipeline.capture(),
         local_tz=local_tz,
     )
     scheduler.start()
@@ -205,6 +216,7 @@ def run(ctx: click.Context, no_preview: bool, no_rtmp: bool) -> None:
         if disk_timer:
             disk_timer.cancel()
         scheduler.stop()
+        weather.stop()
         stream_ctrl.stop()
         cam.stop()
         logger.info("Clean shutdown complete.")
@@ -217,7 +229,7 @@ def run(ctx: click.Context, no_preview: bool, no_rtmp: bool) -> None:
     # Brief pause so the scheduler thread can complete its first capture
     # before the status snapshot is printed (avoids mid-capture race).
     import time as _time; _time.sleep(0.5)
-    _print_status(profile, state, prof_cfg, disk_guard)
+    _print_status(profile, state, prof_cfg, disk_guard, glob_cfg, local_tz)
 
     # Block main thread indefinitely
     signal.pause()
@@ -233,10 +245,11 @@ def status(ctx: click.Context) -> None:
     profile = ctx.obj["profile"]
     _check_setup_or_exit(profile)
 
-    from timelapse.config.loader import load_profile_config
+    from timelapse.config.loader import load_global_config, load_profile_config
     from timelapse.disk.guard import DiskGuard
     from timelapse.scheduler.state import ProfileState
 
+    glob_cfg = load_global_config()
     prof_cfg = load_profile_config(profile)
     state = ProfileState(profile)
     disk_guard = DiskGuard(
@@ -246,38 +259,90 @@ def status(ctx: click.Context) -> None:
         archive_dir=prof_cfg.archive_path,
         policy=prof_cfg.disk.retention.policy,
     )
-    _print_status(profile, state, prof_cfg, disk_guard)
+    _print_status(
+        profile, state, prof_cfg, disk_guard, glob_cfg, _resolve_tz(glob_cfg.timezone)
+    )
 
 
-def _print_status(profile: str, state, prof_cfg, disk_guard) -> None:
-    from timelapse.config.models import IntervalSchedule, SolarSchedule, TimesSchedule
-
+def _print_status(profile: str, state, prof_cfg, disk_guard, glob_cfg, local_tz) -> None:
     data = state.as_dict()
     ds = disk_guard.status()
-
-    schedule = prof_cfg.schedule
-    sched_str = ""
-    if isinstance(schedule, IntervalSchedule):
-        sched_str = f"interval ({schedule.interval})"
-    elif isinstance(schedule, TimesSchedule):
-        sched_str = f"times ({', '.join(schedule.times)})"
-    elif isinstance(schedule, SolarSchedule):
-        events = ", ".join(f"{e.type}{e.offset_minutes:+d}m" for e in schedule.events)
-        sched_str = f"solar ({events})"
+    rules = prof_cfg.schedule.describe()
+    location = prof_cfg.location or glob_cfg.location
 
     click.echo(f"\n{'─'*50}")
     click.echo(f"  Profile:       {profile}")
     click.echo(f"  Status:        {state.get_status()}")
-    click.echo(f"  Schedule:      {sched_str}")
+    click.echo(f"  Schedule:      {rules[0]}")
+    for r in rules[1:]:
+        click.echo(f"                 {r}")
     click.echo(f"  Total photos:  {data.get('photo_count', 0)}")
     click.echo(f"  Current batch: {data.get('current_batch', 0)} / {prof_cfg.video.photos_per_video}")
     click.echo(f"  Videos made:   {data.get('video_count', 0)}")
     last = data.get("last_capture_at", "never")
     click.echo(f"  Last capture:  {last}")
+    skipped = data.get("skipped_count", 0)
+    if skipped:
+        click.echo(f"  Skipped slots: {skipped}  (camera busy or clock jumped)")
+    upcoming = _upcoming_lines(prof_cfg.schedule, location, local_tz, limit=5)
+    click.echo(f"  Next captures: {upcoming[0] if upcoming else 'none scheduled'}")
+    for line in upcoming[1:]:
+        click.echo(f"                 {line}")
     click.echo(f"  Disk free:     {ds['free_gb']:.2f} GB  (min {ds['min_free_gb']:.1f} GB)  {'✓' if ds['ok'] else '⚠ LOW'}")
     click.echo(f"  Photos dir:    {prof_cfg.photos_dir}")
     click.echo(f"  Videos dir:    {prof_cfg.videos_dir}")
     click.echo(f"{'─'*50}\n")
+
+
+def _upcoming_lines(schedule, location, local_tz, *, limit: int, until=None) -> list[str]:
+    from timelapse.scheduler.rules import ScheduleError, upcoming
+
+    now = datetime.now(timezone.utc)
+    try:
+        return [
+            f"{t.astimezone(local_tz).strftime('%a %Y-%m-%d %H:%M:%S %Z')}  "
+            f"({'; '.join(r.describe() for r in rules)})"
+            for t, rules in upcoming(schedule, now, local_tz, location, until=until, limit=limit)
+        ]
+    except ScheduleError as exc:
+        return [f"⚠ {exc}"]
+
+
+# ─── schedule ────────────────────────────────────────────────────────────────
+
+
+@cli.group("schedule")
+def schedule_group() -> None:
+    """Inspect the capture schedule."""
+
+
+@schedule_group.command("preview")
+@click.option("--days", default=1, show_default=True, type=click.IntRange(1, 366),
+              help="How many days ahead to show.")
+@click.option("--limit", default=50, show_default=True, type=click.IntRange(1, 10000),
+              help="Maximum number of captures to list.")
+@click.pass_context
+def schedule_preview(ctx: click.Context, days: int, limit: int) -> None:
+    """List upcoming capture times without running anything."""
+    from datetime import timedelta
+
+    profile = ctx.obj["profile"]
+    _check_setup_or_exit(profile)
+    from timelapse.config.loader import load_global_config, load_profile_config
+
+    glob_cfg = load_global_config()
+    prof_cfg = load_profile_config(profile)
+    local_tz = _resolve_tz(glob_cfg.timezone)
+    until = datetime.now(timezone.utc) + timedelta(days=days)
+    lines = _upcoming_lines(
+        prof_cfg.schedule, prof_cfg.location or glob_cfg.location, local_tz,
+        limit=limit, until=until,
+    )
+    click.echo(f"Upcoming captures for '{profile}' (next {days} day(s)):")
+    for line in lines or ["  none"]:
+        click.echo(f"  {line}")
+    if len(lines) == limit:
+        click.echo(f"  … (showing the first {limit}; use --limit to see more)")
 
 
 # ─── snapshot ────────────────────────────────────────────────────────────────

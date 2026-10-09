@@ -114,33 +114,20 @@ class TestAntiDoubleCaptureGuard:
         assert state.was_recently_captured(cooldown_seconds=1) is False
 
 
-class TestSolarCache:
-    def test_cache_miss(self, state):
-        assert state.get_solar_cache("2024-01-15") is None
+class TestScheduleSlots:
+    def test_last_slot_falls_back_to_last_capture(self, state):
+        t = datetime(2026, 1, 15, 8, 0, tzinfo=timezone.utc)
+        state.record_capture(t)
+        assert state.get_last_slot_time() == t
 
-    def test_cache_hit(self, state):
-        times = {
-            "sunrise": "2024-01-15T07:30:00+00:00",
-            "solar_noon": "2024-01-15T12:00:00+00:00",
-            "sunset": "2024-01-15T17:30:00+00:00",
-            "source": "astral",
-        }
-        state.set_solar_cache("2024-01-15", times)
-        result = state.get_solar_cache("2024-01-15")
-        assert result is not None
-        assert result["sunrise"] == times["sunrise"]
+    def test_set_last_slot(self, state):
+        t = datetime(2026, 1, 15, 8, 5, tzinfo=timezone.utc)
+        state.set_last_slot(t)
+        assert state.get_last_slot_time() == t
 
-    def test_cache_wrong_date(self, state):
-        times = {
-            "sunrise": "2024-01-15T07:30:00+00:00",
-            "solar_noon": "2024-01-15T12:00:00+00:00",
-            "sunset": "2024-01-15T17:30:00+00:00",
-        }
-        state.set_solar_cache("2024-01-15", times)
-        assert state.get_solar_cache("2024-01-16") is None
+    def test_skipped_count(self, state):
+        assert state.get_skipped_count() == 0
+        state.record_skipped()
+        state.record_skipped()
+        assert state.get_skipped_count() == 2
 
-    def test_cache_overwrites_old_date(self, state):
-        state.set_solar_cache("2024-01-14", {"sunrise": "X", "solar_noon": "Y", "sunset": "Z"})
-        state.set_solar_cache("2024-01-15", {"sunrise": "A", "solar_noon": "B", "sunset": "C"})
-        assert state.get_solar_cache("2024-01-14") is None
-        assert state.get_solar_cache("2024-01-15") is not None

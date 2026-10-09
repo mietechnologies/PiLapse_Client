@@ -5,12 +5,14 @@ On each scheduled tick the pipeline:
   1. Checks disk free space (disk guard)
   2. Asks the camera for a still
   3. Names the file with a timestamp
-  4. Updates state
+  4. Updates state (and, if weather recording is on, appends the photo and
+     the latest weather reading to `captures.jsonl` in the photos dir)
   5. If batch threshold reached, optionally triggers video generation
 """
 
 from __future__ import annotations
 
+import json
 import logging
 from datetime import datetime, timezone
 from pathlib import Path
@@ -19,8 +21,12 @@ from timelapse.capture.camera import PiCamera, MockCamera
 from timelapse.config.models import ProfileConfig
 from timelapse.disk.guard import DiskGuard
 from timelapse.scheduler.state import ProfileState
+from timelapse.weather import WeatherRecorder
 
 logger = logging.getLogger(__name__)
+
+# Per-photo metadata (weather) log, one JSON object per line
+CAPTURE_LOG = "captures.jsonl"
 
 
 def make_filename(dt: datetime, prefix: str = "frame") -> str:
@@ -45,12 +51,14 @@ class CapturePipeline:
         camera: "PiCamera | MockCamera",
         disk_guard: "DiskGuard",
         video_trigger_fn: "callable | None" = None,
+        weather: "WeatherRecorder | None" = None,
     ) -> None:
         self._cfg = config
         self._state = state
         self._camera = camera
         self._disk_guard = disk_guard
         self._video_trigger = video_trigger_fn
+        self._weather = weather
 
     def __call__(self) -> bool:
         """Callable interface for the Scheduler."""
@@ -84,6 +92,7 @@ class CapturePipeline:
 
         # 4. Update state
         self._state.record_capture(now)
+        self._log_capture(filename, now)
         batch = self._state.get_current_batch()
         logger.info(
             "Captured %s  (batch %d / %d)",
@@ -100,6 +109,22 @@ class CapturePipeline:
             # Reset batch counter (done inside record_video)
 
         return True
+
+    def _log_capture(self, filename: str, captured_at: datetime) -> None:
+        """Append one line per photo with the weather at capture time."""
+        if self._weather is None or not self._weather.usable:
+            return
+        reading = self._weather.latest()
+        entry = {
+            "file": filename,
+            "captured_at": captured_at.isoformat(),
+            "weather": reading.as_dict() if reading else None,
+        }
+        try:
+            with (self._cfg.photos_path / CAPTURE_LOG).open("a") as f:
+                f.write(json.dumps(entry) + "\n")
+        except OSError as exc:
+            logger.warning("Could not write %s: %s", CAPTURE_LOG, exc)
 
     def snapshot(self, output_path: Path) -> bool:
         """Manual one-shot capture to an explicit path (for `timelapse snapshot`)."""

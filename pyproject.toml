@@ -27,8 +27,8 @@ dependencies = [
     "click>=8.1",           # CLI framework
     "pydantic>=2.5",        # Config validation
     "pyyaml>=6.0",          # YAML config files
-    "requests>=2.31",       # OpenWeatherMap API
-    "astral>=3.2",          # Offline solar calculations (fallback)
+    "requests>=2.31",       # Weather (OpenWeatherMap) + location lookup
+    "astral>=3.2",          # Offline sunrise/sunset calculations
     "python-dateutil>=2.8", # Robust date/time parsing
     "tzlocal>=5.0",         # System timezone detection
 ]

@@ -1,198 +1,84 @@
 """
 Solar time calculations.
 
-Primary source:  OpenWeatherMap One Call API (requires API key).
-Fallback:        `astral` library — offline, pure Python, very accurate.
+Computed offline with the `astral` library from the device location, so
+sun-based rules never depend on the network.  Each event (sunrise, solar
+noon, sunset) is computed on its own: at high latitudes in summer the sun
+still rises and sets even though twilight never ends, and asking astral for
+everything at once would fail the whole day.
 
-If the OWM call fails the fallback is used transparently.
-If neither is available, the solar schedule is skipped for that day.
+On days with no sunrise or sunset (polar day / polar night) those events
+are None and `polar` says which case it is.
 """
 
 from __future__ import annotations
 
 import logging
-import os
-from datetime import date, datetime, timedelta, timezone
+from dataclasses import dataclass
+from datetime import date, datetime, timedelta
+from functools import lru_cache
 from typing import Optional
 
 logger = logging.getLogger(__name__)
 
 
-# ─── public data class ───────────────────────────────────────────────────────
-
-
+@dataclass(frozen=True)
 class SolarTimes:
-    __slots__ = ("sunrise", "solar_noon", "sunset", "source")
+    sunrise: Optional[datetime]
+    solar_noon: Optional[datetime]
+    sunset: Optional[datetime]
+    # "day" if the sun never sets, "night" if it never rises, else None
+    polar: Optional[str] = None
 
-    def __init__(
-        self,
-        sunrise: datetime,
-        solar_noon: datetime,
-        sunset: datetime,
-        source: str = "unknown",
-    ) -> None:
-        self.sunrise = sunrise
-        self.solar_noon = solar_noon
-        self.sunset = sunset
-        self.source = source
+    def get(self, event: str) -> Optional[datetime]:
+        return getattr(self, event)
 
-    def as_dict(self) -> dict[str, str]:
+    def as_dict(self) -> dict[str, Optional[str]]:
         return {
-            "sunrise": self.sunrise.isoformat(),
-            "solar_noon": self.solar_noon.isoformat(),
-            "sunset": self.sunset.isoformat(),
-            "source": self.source,
+            "sunrise": self.sunrise.isoformat() if self.sunrise else None,
+            "solar_noon": self.solar_noon.isoformat() if self.solar_noon else None,
+            "sunset": self.sunset.isoformat() if self.sunset else None,
+            "polar": self.polar,
         }
 
-    @classmethod
-    def from_dict(cls, d: dict[str, str]) -> "SolarTimes":
-        return cls(
-            sunrise=datetime.fromisoformat(d["sunrise"]),
-            solar_noon=datetime.fromisoformat(d["solar_noon"]),
-            sunset=datetime.fromisoformat(d["sunset"]),
-            source=d.get("source", "cache"),
-        )
+
+def get_solar_times(lat: float, lon: float, for_date: date, tz) -> SolarTimes:
+    """Sun times for the local calendar date `for_date` in timezone `tz`."""
+    return _solar_times_cached(round(lat, 4), round(lon, 4), for_date, tz)
 
 
-# ─── OWM provider ────────────────────────────────────────────────────────────
+@lru_cache(maxsize=512)
+def _solar_times_cached(lat: float, lon: float, for_date: date, tz) -> SolarTimes:
+    from astral import Observer
+    from astral.sun import elevation, noon, sunrise, sunset
 
+    obs = Observer(latitude=lat, longitude=lon)
 
-def _fetch_owm(lat: float, lon: float, api_key: str) -> Optional[SolarTimes]:
-    """
-    Fetch today's solar times from OpenWeatherMap One Call 3.0 / 2.5 API.
-    Returns None on any network or API error.
-    """
-    try:
-        import requests
-
-        # Try One Call 3.0 first, fall back to the free 2.5 endpoint
-        url = (
-            f"https://api.openweathermap.org/data/3.0/onecall"
-            f"?lat={lat}&lon={lon}&exclude=minutely,hourly,daily,alerts"
-            f"&appid={api_key}"
-        )
-        resp = requests.get(url, timeout=10)
-        if resp.status_code == 401:
-            # 3.0 may require subscription; try 2.5 weather endpoint for sunrise/sunset
-            url25 = (
-                f"https://api.openweathermap.org/data/2.5/weather"
-                f"?lat={lat}&lon={lon}&appid={api_key}"
-            )
-            resp = requests.get(url25, timeout=10)
-            resp.raise_for_status()
-            data = resp.json()
-            sys_data = data.get("sys", {})
-            sunrise_ts = sys_data.get("sunrise")
-            sunset_ts = sys_data.get("sunset")
-            if not (sunrise_ts and sunset_ts):
-                return None
-            sunrise = datetime.fromtimestamp(sunrise_ts, tz=timezone.utc)
-            sunset = datetime.fromtimestamp(sunset_ts, tz=timezone.utc)
-            solar_noon = sunrise + (sunset - sunrise) / 2
-            return SolarTimes(sunrise, solar_noon, sunset, source="owm-2.5")
-
-        resp.raise_for_status()
-        data = resp.json()
-        current = data.get("current", {})
-        sunrise_ts = current.get("sunrise")
-        sunset_ts = current.get("sunset")
-        if not (sunrise_ts and sunset_ts):
+    def _event(fn) -> Optional[datetime]:
+        try:
+            return fn(obs, date=for_date, tzinfo=tz)
+        except ValueError:
+            # Sun never crosses the horizon on this date
             return None
-        sunrise = datetime.fromtimestamp(sunrise_ts, tz=timezone.utc)
-        sunset = datetime.fromtimestamp(sunset_ts, tz=timezone.utc)
-        solar_noon = sunrise + (sunset - sunrise) / 2
-        return SolarTimes(sunrise, solar_noon, sunset, source="owm-3.0")
 
-    except Exception as exc:
-        logger.warning("OWM fetch failed: %s", exc)
-        return None
+    rise = _event(sunrise)
+    set_ = _event(sunset)
+    noon_dt = noon(obs, date=for_date, tzinfo=tz)
 
+    polar = None
+    if rise is None or set_ is None:
+        polar = "day" if elevation(obs, noon_dt) > 0 else "night"
 
-# ─── astral fallback ─────────────────────────────────────────────────────────
-
-
-def _fetch_astral(lat: float, lon: float, for_date: date) -> Optional[SolarTimes]:
-    """Use the `astral` library for offline calculation."""
-    try:
-        from astral import LocationInfo
-        from astral.sun import sun
-
-        loc = LocationInfo(latitude=lat, longitude=lon)
-        s = sun(loc.observer, date=for_date, tzinfo=timezone.utc)
-        return SolarTimes(
-            sunrise=s["sunrise"],
-            solar_noon=s["noon"],
-            sunset=s["sunset"],
-            source="astral",
-        )
-    except ImportError:
-        logger.warning("astral library not installed — cannot compute solar times offline.")
-        return None
-    except Exception as exc:
-        logger.warning("astral calculation failed: %s", exc)
-        return None
+    return SolarTimes(sunrise=rise, solar_noon=noon_dt, sunset=set_, polar=polar)
 
 
-# ─── public API ──────────────────────────────────────────────────────────────
-
-
-def get_solar_times(
-    lat: float,
-    lon: float,
-    api_key_env: str,
-    for_date: Optional[date] = None,
-) -> Optional[SolarTimes]:
+def tz_location_mismatch_hours(lon: float, tz, on: Optional[date] = None) -> float:
     """
-    Get solar times for `for_date` (default: today UTC).
-
-    1. Try OpenWeatherMap if API key is set.
-    2. Fall back to astral.
-    3. Return None if both fail (caller should skip solar captures).
+    How far (in hours) the timezone's standard offset is from what the
+    longitude implies.  Large values mean the location or the system
+    timezone is probably wrong.
     """
-    if for_date is None:
-        for_date = date.today()
-
-    api_key = os.environ.get(api_key_env, "").strip()
-    if api_key:
-        result = _fetch_owm(lat, lon, api_key)
-        if result:
-            logger.debug("Solar times from OWM: %s", result.as_dict())
-            return result
-        logger.warning(
-            "OWM failed; falling back to astral. "
-            "Solar times may differ slightly from OWM."
-        )
-
-    result = _fetch_astral(lat, lon, for_date)
-    if result:
-        logger.debug("Solar times from astral: %s", result.as_dict())
-        return result
-
-    logger.error(
-        "Could not obtain solar times (no API key, no astral, or both failed). "
-        "Solar captures will be skipped today."
-    )
-    return None
-
-
-def compute_solar_schedule(
-    solar_times: SolarTimes,
-    events: list,  # list[SolarEvent]
-    local_tz,
-) -> list[datetime]:
-    """
-    Given resolved SolarTimes and a list of SolarEvent configs,
-    return a sorted list of aware datetimes for today's solar captures.
-    """
-    base_map = {
-        "sunrise": solar_times.sunrise,
-        "solar_noon": solar_times.solar_noon,
-        "sunset": solar_times.sunset,
-    }
-    result: list[datetime] = []
-    for event in events:
-        base = base_map[event.type]
-        dt = base + timedelta(minutes=event.offset_minutes)
-        dt_local = dt.astimezone(local_tz)
-        result.append(dt_local)
-    return sorted(result)
+    on = on or date.today()
+    probe = datetime(on.year, 1, 1, 12, tzinfo=tz)
+    standard = (probe.utcoffset() or timedelta(0)) - (probe.dst() or timedelta(0))
+    return abs(standard.total_seconds() / 3600 - lon / 15.0)

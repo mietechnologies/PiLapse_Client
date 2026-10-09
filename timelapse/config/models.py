@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import re
 from pathlib import Path
-from typing import Annotated, Literal, Optional, Union
+from typing import Literal, Optional, Union
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
@@ -45,63 +45,313 @@ def parse_hhmm(value: str) -> tuple[int, int]:
 
 
 # ─── schedule models ────────────────────────────────────────────────────────
+#
+# A schedule is a list of rules; the camera fires at the earliest next time
+# across all of them.  Each rule is identified by its key:
+#
+#   - at: ["07:30", "12:00"]                  fixed local times each day
+#   - every: 5m                               fixed interval (aligned to the clock)
+#     between: ["sunrise-30m", "sunset+30m"]  optional daily window
+#   - sun: sunset                             sunrise | solar_noon | sunset
+#     offset: -15m                            optional signed offset
+#
+# Every rule accepts an optional `days: [mon, tue, ...]` filter.
+
+_OFFSET_RE = re.compile(r"^([+-])?\s*(\d+)(s|m|h)?$", re.IGNORECASE)
+_SUN_EVENTS = ("sunrise", "solar_noon", "sunset")
+_TIMESPEC_RE = re.compile(
+    r"^(?:(?P<hhmm>\d{1,2}:\d{2})|(?P<sun>sunrise|solar_noon|sunset)\s*(?P<off>[+-]\s*\d+[smh]?)?)$",
+    re.IGNORECASE,
+)
+WEEKDAYS = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")
+
+SunEvent = Literal["sunrise", "solar_noon", "sunset"]
 
 
-class IntervalSchedule(BaseModel):
-    mode: Literal["interval"] = "interval"
-    interval: str = "5m"
+def parse_offset_seconds(value: "str | int") -> int:
+    """Parse a signed offset ('-15m', '+1h', '30s', '0') → seconds.
 
-    @field_validator("interval")
+    A bare number is minutes, so `offset: -15` in YAML means 15 minutes before.
+    """
+    if isinstance(value, bool):
+        raise ValueError(f"Invalid offset '{value}'.")
+    if isinstance(value, int):
+        return value * 60
+    m = _OFFSET_RE.match(str(value).strip())
+    if not m:
+        raise ValueError(
+            f"Invalid offset '{value}'. Use e.g. '-15m', '+1h', '30s' or '0'."
+        )
+    sign = -1 if m.group(1) == "-" else 1
+    n = int(m.group(2))
+    unit = (m.group(3) or "m").lower()
+    return sign * n * {"s": 1, "m": 60, "h": 3600}[unit]
+
+
+class TimeSpec(BaseModel):
+    """A time of day: either a clock time or a sun event with an offset."""
+
+    hour: Optional[int] = None
+    minute: Optional[int] = None
+    sun: Optional[SunEvent] = None
+    offset_s: int = 0
+
     @classmethod
-    def validate_interval(cls, v: str) -> str:
-        parse_interval_seconds(v)  # raises if invalid
-        return v
+    def parse(cls, value: str) -> "TimeSpec":
+        m = _TIMESPEC_RE.match(str(value).strip())
+        if not m:
+            raise ValueError(
+                f"Invalid time '{value}'. Use HH:MM or a sun event like "
+                "'sunrise', 'sunset+30m', 'solar_noon-1h'."
+            )
+        if m.group("hhmm"):
+            h, mm = parse_hhmm(m.group("hhmm"))
+            return cls(hour=h, minute=mm)
+        off = m.group("off")
+        return cls(
+            sun=m.group("sun").lower(),  # type: ignore[arg-type]
+            offset_s=parse_offset_seconds(off.replace(" ", "")) if off else 0,
+        )
+
+
+def _yaml_time(v):
+    """YAML 1.1 reads an unquoted 12:00 as the base-60 integer 720; undo that."""
+    if isinstance(v, int) and not isinstance(v, bool) and 0 <= v < 24 * 60:
+        return f"{v // 60:02d}:{v % 60:02d}"
+    return v
+
+
+def _validate_days(v: Optional[list[str]]) -> Optional[list[str]]:
+    if v is None:
+        return None
+    out = []
+    for d in v:
+        key = str(d).strip().lower()[:3]
+        if key not in WEEKDAYS:
+            raise ValueError(f"Unknown day '{d}'. Use mon, tue, wed, thu, fri, sat, sun.")
+        out.append(key)
+    if not out:
+        raise ValueError("days must list at least one day (or be omitted).")
+    return out
+
+
+class _RuleBase(BaseModel):
+    model_config = {"extra": "forbid"}
+
+    days: Optional[list[str]] = None
+
+    @field_validator("days")
+    @classmethod
+    def validate_days(cls, v: Optional[list[str]]) -> Optional[list[str]]:
+        return _validate_days(v)
 
     @property
-    def interval_seconds(self) -> int:
-        return parse_interval_seconds(self.interval)
+    def weekdays(self) -> Optional[set[int]]:
+        """Allowed weekdays as date.weekday() numbers, or None for every day."""
+        if self.days is None:
+            return None
+        return {WEEKDAYS.index(d) for d in self.days}
+
+    @property
+    def uses_sun(self) -> bool:
+        return False
 
 
-class TimesSchedule(BaseModel):
-    mode: Literal["times"] = "times"
-    times: list[str] = Field(min_length=1)
+class AtRule(_RuleBase):
+    """Fire at one or more fixed local times every day."""
 
-    @field_validator("times")
+    at: list[str] = Field(min_length=1)
+
+    @field_validator("at", mode="before")
+    @classmethod
+    def coerce_single(cls, v):
+        v = [v] if isinstance(v, (str, int)) else v
+        return [_yaml_time(t) for t in v] if isinstance(v, list) else v
+
+    @field_validator("at")
     @classmethod
     def validate_times(cls, v: list[str]) -> list[str]:
         for t in v:
             parse_hhmm(t)
-        return sorted(v)  # keep sorted for deterministic next-time calculation
+        return sorted(set(v))
+
+    def describe(self) -> str:
+        return "at " + ", ".join(self.at)
 
 
-class SolarEvent(BaseModel):
-    type: Literal["sunrise", "solar_noon", "sunset"]
-    offset_minutes: int = 0
+class EveryRule(_RuleBase):
+    """Fire on a fixed interval, optionally only inside a daily window."""
 
+    every: str
+    between: Optional[list[str]] = None
 
-class SolarSchedule(BaseModel):
-    mode: Literal["solar"] = "solar"
-    events: list[SolarEvent] = Field(min_length=1)
-    latitude: float = Field(ge=-90, le=90)
-    longitude: float = Field(ge=-180, le=180)
-    owm_api_key_env: str = "TIMELAPSE_OWM_KEY"
-
-    @field_validator("events")
+    @field_validator("every")
     @classmethod
-    def no_duplicate_event_types(cls, v: list[SolarEvent]) -> list[SolarEvent]:
-        seen: set[str] = set()
-        for e in v:
-            key = f"{e.type}_{e.offset_minutes}"
-            if key in seen:
-                raise ValueError(f"Duplicate solar event: {e.type} @{e.offset_minutes}m")
-            seen.add(key)
+    def validate_every(cls, v: str) -> str:
+        parse_interval_seconds(v)
         return v
 
+    @field_validator("between", mode="before")
+    @classmethod
+    def coerce_yaml_times(cls, v):
+        return [_yaml_time(t) for t in v] if isinstance(v, list) else v
 
-Schedule = Annotated[
-    Union[IntervalSchedule, TimesSchedule, SolarSchedule],
-    Field(discriminator="mode"),
-]
+    @field_validator("between")
+    @classmethod
+    def validate_between(cls, v: Optional[list[str]]) -> Optional[list[str]]:
+        if v is None:
+            return None
+        if len(v) != 2:
+            raise ValueError("between must be [start, end], e.g. ['sunrise-30m', 'sunset+30m'].")
+        for t in v:
+            TimeSpec.parse(t)
+        return v
+
+    @property
+    def interval_seconds(self) -> int:
+        return parse_interval_seconds(self.every)
+
+    @property
+    def window(self) -> Optional[tuple[TimeSpec, TimeSpec]]:
+        if self.between is None:
+            return None
+        return TimeSpec.parse(self.between[0]), TimeSpec.parse(self.between[1])
+
+    @property
+    def uses_sun(self) -> bool:
+        w = self.window
+        return bool(w and (w[0].sun or w[1].sun))
+
+    def describe(self) -> str:
+        s = f"every {self.every}"
+        if self.between:
+            s += f" between {self.between[0]} and {self.between[1]}"
+        return s
+
+
+class SunRule(_RuleBase):
+    """Fire at a sun event (sunrise, solar noon, sunset) plus an offset."""
+
+    sun: SunEvent
+    offset: str = "0"
+
+    @field_validator("offset", mode="before")
+    @classmethod
+    def validate_offset(cls, v) -> str:
+        parse_offset_seconds(v)
+        return str(v)
+
+    @property
+    def offset_seconds(self) -> int:
+        return parse_offset_seconds(self.offset)
+
+    @property
+    def uses_sun(self) -> bool:
+        return True
+
+    def describe(self) -> str:
+        off = self.offset_seconds
+        if off == 0:
+            return self.sun
+        sign = "+" if off > 0 else "-"
+        return f"{self.sun} {sign}{_fmt_seconds(abs(off))}"
+
+
+def _fmt_seconds(s: int) -> str:
+    if s % 3600 == 0:
+        return f"{s // 3600}h"
+    if s % 60 == 0:
+        return f"{s // 60}m"
+    return f"{s}s"
+
+
+Rule = Union[AtRule, EveryRule, SunRule]
+
+
+def _describe_days(rule: _RuleBase) -> str:
+    return f" ({', '.join(rule.days)})" if rule.days else ""
+
+
+class ScheduleConfig(BaseModel):
+    rules: list[Rule] = Field(min_length=1, default_factory=lambda: [EveryRule(every="5m")])
+    # After downtime (reboot, restart), a slot missed by at most this much is
+    # still taken once; older misses are skipped.
+    catch_up: str = "10m"
+
+    @field_validator("catch_up")
+    @classmethod
+    def validate_catch_up(cls, v: str) -> str:
+        if str(v).strip() not in ("0", "0s", "0m"):
+            parse_interval_seconds(v)
+        return v
+
+    @property
+    def catch_up_seconds(self) -> int:
+        v = str(self.catch_up).strip()
+        return 0 if v in ("0", "0s", "0m") else parse_interval_seconds(v)
+
+    @property
+    def uses_sun(self) -> bool:
+        return any(r.uses_sun for r in self.rules)
+
+    def describe(self) -> list[str]:
+        return [r.describe() + _describe_days(r) for r in self.rules]
+
+    @model_validator(mode="before")
+    @classmethod
+    def upgrade_legacy(cls, data):
+        """Accept the 0.1.0 single-mode format (`mode: interval|times|solar`)."""
+        if not isinstance(data, dict) or "mode" not in data:
+            return data
+        return {"rules": legacy_schedule_rules(data)}
+
+
+def legacy_schedule_rules(data: dict) -> list[dict]:
+    """Convert a 0.1.0 `schedule:` block to a list of rule dicts."""
+    mode = data.get("mode")
+    if mode == "interval":
+        return [{"every": data.get("interval", "5m")}]
+    if mode == "times":
+        return [{"at": data.get("times", [])}]
+    if mode == "solar":
+        return [
+            {"sun": e["type"], "offset": f"{int(e.get('offset_minutes', 0))}m"}
+            for e in data.get("events", [])
+        ]
+    raise ValueError(f"Unknown legacy schedule mode '{mode}'.")
+
+
+# ─── location & weather ─────────────────────────────────────────────────────
+
+
+class LocationConfig(BaseModel):
+    latitude: float = Field(ge=-90, le=90)
+    longitude: float = Field(ge=-180, le=180)
+    name: Optional[str] = None
+    # How the location was set: ip | search | manual | legacy (informational)
+    source: str = "manual"
+
+
+class WeatherConfig(BaseModel):
+    """Record current weather (OpenWeatherMap) alongside each photo."""
+
+    enabled: bool = False
+    provider: Literal["openweathermap"] = "openweathermap"
+    # Name of the env var holding the API key — never the key itself
+    api_key_env: str = "TIMELAPSE_OWM_KEY"
+    refresh: str = "10m"
+    units: Literal["metric", "imperial"] = "metric"
+
+    @field_validator("refresh")
+    @classmethod
+    def validate_refresh(cls, v: str) -> str:
+        if parse_interval_seconds(v) < 60:
+            raise ValueError("weather.refresh must be at least 1m.")
+        return v
+
+    @property
+    def refresh_seconds(self) -> int:
+        return parse_interval_seconds(self.refresh)
 
 
 # ─── capture ────────────────────────────────────────────────────────────────
@@ -222,10 +472,32 @@ class ProfileConfig(BaseModel):
     archive_dir: str = "~/timelapse/{profile}/archive"
 
     capture: CaptureConfig = Field(default_factory=CaptureConfig)
-    schedule: Schedule = Field(default_factory=IntervalSchedule)
+    schedule: ScheduleConfig = Field(default_factory=ScheduleConfig)
+    # Optional per-profile override of the device location (global config).
+    # Set automatically when loading a 0.1.0 solar schedule.
+    location: Optional[LocationConfig] = None
     disk: DiskConfig = Field(default_factory=DiskConfig)
     video: VideoConfig = Field(default_factory=VideoConfig)
     streaming: StreamingConfig = Field(default_factory=StreamingConfig)
+
+    @model_validator(mode="before")
+    @classmethod
+    def lift_legacy_solar_location(cls, data):
+        """0.1.0 kept lat/lon inside a solar schedule; move it to `location`."""
+        if not isinstance(data, dict):
+            return data
+        sched = data.get("schedule")
+        if isinstance(sched, dict) and sched.get("mode") == "solar" and "latitude" in sched:
+            data = dict(data)
+            data.setdefault(
+                "location",
+                {
+                    "latitude": sched["latitude"],
+                    "longitude": sched["longitude"],
+                    "source": "legacy",
+                },
+            )
+        return data
 
     @model_validator(mode="after")
     def validate_rtmp_key_env_name(self) -> "ProfileConfig":
@@ -262,6 +534,9 @@ class GlobalConfig(BaseModel):
     timezone: Optional[str] = None
     log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR"] = "INFO"
     log_dir: str = "~/.local/share/timelapse/logs"
+    # Device location — used by sun-based rules and weather
+    location: Optional[LocationConfig] = None
+    weather: WeatherConfig = Field(default_factory=WeatherConfig)
 
     @property
     def log_path(self) -> Path:

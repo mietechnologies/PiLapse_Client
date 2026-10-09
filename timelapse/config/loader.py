@@ -147,16 +147,23 @@ def validate_config(profile: str = DEFAULT_PROFILE) -> list[str]:
         errors.append(str(e))
 
     try:
+        glob = load_global_config()
+    except ConfigError:
+        glob = GlobalConfig()
+
+    try:
         cfg = load_profile_config(profile)
         # Extra semantic checks
-        errors.extend(_semantic_checks(cfg, profile))
+        errors.extend(_semantic_checks(cfg, profile, glob))
     except ConfigError as e:
         errors.append(str(e))
 
     return errors
 
 
-def _semantic_checks(cfg: ProfileConfig, profile: str) -> list[str]:
+def _semantic_checks(
+    cfg: ProfileConfig, profile: str, glob: Optional[GlobalConfig] = None
+) -> list[str]:
     """Business-logic checks beyond pydantic field validation."""
     issues: list[str] = []
 
@@ -168,15 +175,30 @@ def _semantic_checks(cfg: ProfileConfig, profile: str) -> list[str]:
                 "CPU-intensive on Pi Zero W. Consider MJPEG preview or disabling one."
             )
 
-    # Solar schedule needs lat/lon
-    from timelapse.config.models import SolarSchedule
+    # Sun-based rules need a location (profile override or device-wide)
+    from timelapse.scheduler.rules import validate_schedule
 
-    if isinstance(cfg.schedule, SolarSchedule):
-        if cfg.schedule.latitude == 0 and cfg.schedule.longitude == 0:
-            issues.append(
-                "Solar schedule: latitude/longitude are both 0 — likely a placeholder. "
-                "Update with your real coordinates."
-            )
+    location = cfg.location or (glob.location if glob else None)
+    issues.extend(validate_schedule(cfg.schedule, location))
+    if location is not None and glob is not None and glob.timezone:
+        try:
+            import zoneinfo
+
+            from timelapse.scheduler.solar import tz_location_mismatch_hours
+
+            if tz_location_mismatch_hours(location.longitude, zoneinfo.ZoneInfo(glob.timezone)) > 2.5:
+                issues.append(
+                    f"Warning: location ({location.latitude}, {location.longitude}) doesn't "
+                    f"look like it's in timezone {glob.timezone}; sun-based captures may "
+                    "land at odd hours."
+                )
+        except Exception:
+            pass
+    if location is not None and location.latitude == 0 and location.longitude == 0:
+        issues.append(
+            "location: latitude/longitude are both 0 — likely a placeholder. "
+            "Run `timelapse setup` to set your real location."
+        )
 
     # photos_per_video sanity
     if cfg.video.photos_per_video < 10:

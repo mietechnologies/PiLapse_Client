@@ -13,3 +13,21 @@ log_level: "INFO"
 
 # Where log files are stored.  One file per profile, 5 MB × 5 rotations.
 log_dir: "~/.local/share/timelapse/logs"
+
+# Device location — used by sunrise/sunset rules and weather.
+# `timelapse setup` can detect it from your internet connection, search by
+# city name, or take coordinates.  Sun times are computed offline from this.
+location:
+  latitude: 41.08
+  longitude: -85.14
+  name: "Fort Wayne, Indiana, US"   # informational
+  source: manual                    # ip | search | manual (informational)
+
+# Record current weather (OpenWeatherMap) with each photo, in
+# <photos_dir>/captures.jsonl.  Needs a free API key in the env var below.
+# Photos are taken normally if the key is missing or the network is down.
+weather:
+  enabled: false
+  api_key_env: "TIMELAPSE_OWM_KEY"  # env var name (not the key itself)
+  refresh: "10m"                    # how often to fetch (min 1m)
+  units: metric                     # metric (°C, m/s) | imperial (°F, mph)

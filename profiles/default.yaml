@@ -19,37 +19,35 @@ capture:
   capture_timeout_s: 10
 
 # ─── Capture schedule ────────────────────────────────────────────────────────
-# Choose ONE mode: interval | times | solar
-
-# Mode 1: Fixed interval
+# A list of rules; the camera fires whenever ANY rule is due.
+#   at:     fixed local times each day
+#   every:  an interval (s, m, h, d), aligned to the clock (5m → :00, :05, ...)
+#           optional `between: [start, end]` window; ends can be HH:MM or
+#           sunrise / solar_noon / sunset with an offset, e.g. sunset+30m
+#   sun:    sunrise | solar_noon | sunset, with optional `offset` (-15m, +1h)
+# Any rule can take `days: [mon, tue, wed, thu, fri, sat, sun]`.
+# Sun-based rules use the device `location` in ~/.config/timelapse/config.yaml.
+# Quote times ("12:00") — unquoted 12:00 is also accepted.
 schedule:
-  mode: interval
-  interval: "5m"       # Supported units: s, m, h, d
+  rules:
+    - every: "5m"
 
-# Mode 2: Specific times each day (uncomment and remove mode 1)
-# schedule:
-#   mode: times
-#   times:
-#     - "08:00"
-#     - "12:00"
-#     - "17:00"
-#     - "20:30"
+  # More examples:
+  #   - at: ["07:30"]                              # every day at 07:30
+  #   - at: ["08:00", "12:00", "17:00"]            # several times a day
+  #   - sun: sunrise                               # 10 min after sunrise
+  #     offset: "+10m"
+  #   - sun: sunset                                # 15 min before sunset
+  #     offset: "-15m"
+  #   - every: "1m"                                # daylight only, weekdays
+  #     between: ["sunrise-30m", "sunset+30m"]
+  #     days: [mon, tue, wed, thu, fri]
 
-# Mode 3: Solar-based (uncomment and remove modes 1 & 2)
-# Requires: pip install astral
-# Optionally uses OpenWeatherMap for refined times (set $TIMELAPSE_OWM_KEY).
-# schedule:
-#   mode: solar
-#   latitude: 51.5074        # London
-#   longitude: -0.1278
-#   owm_api_key_env: "TIMELAPSE_OWM_KEY"   # env var name (not the key itself)
-#   events:
-#     - type: sunrise
-#       offset_minutes: 10   # Capture 10 min after sunrise
-#     - type: solar_noon
-#       offset_minutes: 0
-#     - type: sunset
-#       offset_minutes: -15  # Capture 15 min before sunset
+  # After downtime, a slot missed by at most this much is still taken once.
+  catch_up: "10m"
+
+  # The 0.1.0 format (`mode: interval | times | solar`) still loads and is
+  # converted automatically.
 
 # ─── Disk guard ──────────────────────────────────────────────────────────────
 disk:

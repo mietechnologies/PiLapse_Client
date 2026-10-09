@@ -9,7 +9,8 @@ Tracked:
   - video_count          total videos generated
   - current_batch        photos since last video generation
   - status               running | completed | paused | error
-  - solar_cache          cached sunrise/noon/sunset for today (avoids repeat API calls)
+  - last_slot_at         the most recent schedule slot handled (fired, failed or not)
+  - skipped_count        slots skipped because the camera was still busy
 """
 
 from __future__ import annotations
@@ -141,23 +142,27 @@ class ProfileState:
             self._data["current_batch"] = 0
             self._save()
 
-    # ── solar cache ────────────────────────────────────────────────────────
+    # ── schedule slots ─────────────────────────────────────────────────────
 
-    def get_solar_cache(self, date_str: str) -> Optional[dict[str, str]]:
-        """
-        Return cached solar times for `date_str` (YYYY-MM-DD), or None if stale/missing.
-        """
+    def get_last_slot_time(self) -> Optional[datetime]:
+        """Last schedule slot handled; falls back to the last capture (0.1.0 state)."""
         with self._lock:
-            cache = self._get("solar_cache")
-            if cache and cache.get("date") == date_str:
-                return cache
-            return None
+            return _parse_dt(self._get("last_slot_at")) or _parse_dt(
+                self._get("last_capture_at")
+            )
 
-    def set_solar_cache(self, date_str: str, times: dict[str, str]) -> None:
-        """Cache solar times dict {sunrise, solar_noon, sunset} for a date."""
+    def set_last_slot(self, slot: datetime) -> None:
+        with self._lock:
+            self._set("last_slot_at", slot.isoformat())
+
+    def get_skipped_count(self) -> int:
+        with self._lock:
+            return self._get("skipped_count", 0)
+
+    def record_skipped(self, n: int = 1) -> None:
         with self._lock:
             self._ensure_loaded()
-            self._data["solar_cache"] = {"date": date_str, **times}
+            self._data["skipped_count"] = self._data.get("skipped_count", 0) + n
             self._save()
 
     # ── anti-double-capture helpers ────────────────────────────────────────
