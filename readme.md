@@ -9,7 +9,8 @@ Designed, built, and tested by [Brett Chapin](https://github.com/BAChapin) / [Mi
 ## Features
 
 - **Fully standalone** — captures, stores, and generates videos on-device (no server required)
-- **Scheduled capture** — interval, fixed times, or solar (sunrise/solar noon/sunset)
+- **Scheduled capture** — combine fixed times, intervals (optionally only in a daylight window), and sunrise/solar noon/sunset with offsets
+- **Weather recording** — optional OpenWeatherMap conditions saved with every photo
 - **Live preview** — MJPEG (Pi Zero W) or HLS (Pi Zero 2 W+) via built-in web server
 - **RTMP restreaming** — stream live to YouTube / Twitch / any RTMP server (Pi Zero 2 W+)
 - **Automatic video generation** — ffmpeg stitches frames when your threshold is hit
@@ -69,7 +70,7 @@ Minimum required packages (installed automatically):
 | `click` | CLI |
 | `pydantic` | Config validation |
 | `pyyaml` | YAML config files |
-| `requests` | OpenWeatherMap API |
+| `requests` | Weather (OpenWeatherMap) and location lookup during setup |
 | `astral` | Offline solar time calculation |
 | `python-dateutil` | Date/time parsing |
 | `tzlocal` | System timezone detection |
@@ -122,6 +123,7 @@ Commands:
   status              Show capture statistics and disk status
   snapshot            Take one frame immediately (outside normal schedule)
   gen-video           Generate video from current photo batch now
+  schedule preview    List upcoming capture times
   config validate     Check config for errors
   config show         Print resolved config as YAML
 ```
@@ -144,35 +146,42 @@ Commands:
 
 See `profiles/default.yaml` and `config.example.yaml` for fully commented examples.
 
-### Schedule modes
+### Schedule
 
-**Interval** — every N seconds/minutes/hours:
+A schedule is a list of rules. The camera fires whenever **any** rule is due.
+
 ```yaml
 schedule:
-  mode: interval
-  interval: "5m"   # 30s, 5m, 2h, 1d
+  rules:
+    - at: ["07:30"]                          # every day at 07:30
+    - at: ["08:00", "12:00", "17:00"]        # several times a day
+    - every: "5m"                            # every 5 minutes (on :00, :05, ...)
+    - every: "1m"                            # only in daylight, on weekdays
+      between: ["sunrise-30m", "sunset+30m"]
+      days: [mon, tue, wed, thu, fri]
+    - sun: sunrise                           # sunrise / solar_noon / sunset
+      offset: "+10m"
+    - sun: sunset
+      offset: "-15m"
 ```
 
-**Fixed times** — one or more HH:MM times per day:
-```yaml
-schedule:
-  mode: times
-  times: ["08:00", "12:00", "17:00"]
+- `every` slots are aligned to the clock, so a 5 s and a 30 s schedule share every 30 s frame.
+- `between` ends are `HH:MM` or a sun event with an optional offset; a window may cross midnight.
+- After a reboot, a slot missed by up to `catch_up` (default `10m`) is still taken once; older ones are skipped.
+- If a capture is still running when the next slot comes up, that slot is skipped (and counted in `timelapse status`), never queued.
+- Old `mode: interval | times | solar` configs from 0.1.0 still load.
+
+Check what a schedule will do without running it:
+
+```bash
+timelapse schedule preview --days 2
 ```
 
-**Solar** — sunrise / solar noon / sunset with optional offsets:
-```yaml
-schedule:
-  mode: solar
-  latitude: 51.5074
-  longitude: -0.1278
-  owm_api_key_env: "TIMELAPSE_OWM_KEY"
-  events:
-    - type: sunrise
-      offset_minutes: 10
-    - type: sunset
-      offset_minutes: -15
-```
+### Location, sunrise/sunset and weather
+
+`timelapse setup` asks for the device location once: detected from your internet connection (you confirm the city), searched by city name, or typed as coordinates. It's stored in `config.yaml`, and sun times are then computed offline with `astral`; nothing touches the network at run time for scheduling.
+
+Optionally, `weather.enabled: true` records the current conditions from OpenWeatherMap (temperature, feels-like, humidity, pressure, clouds, wind, condition) with each photo, as one JSON line per photo in `<photos_dir>/captures.jsonl`. It needs a free API key in `$TIMELAPSE_OWM_KEY`; without one, photos are taken normally with no weather.
 
 ---
 
@@ -203,7 +212,7 @@ Stream keys and passwords are read from **environment variables only** — never
 # /etc/timelapse/default.env (chmod 0600, loaded by systemd)
 TIMELAPSE_RTMP_KEY_DEFAULT=your-stream-key
 TIMELAPSE_WEB_PASSWORD=your-preview-password
-TIMELAPSE_OWM_KEY=your-owm-api-key
+TIMELAPSE_OWM_KEY=your-owm-api-key        # weather recording (optional)
 ```
 
 ---

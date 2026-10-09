@@ -6,6 +6,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- Added rule-based schedules: a profile's `schedule.rules` combines any number of `at` (fixed times), `every` (interval, optionally limited to a `between` window such as `sunrise-30m` to `sunset+30m`) and `sun` (sunrise / solar noon / sunset with offset) rules, each with an optional `days` filter.
+- Added `timelapse schedule preview` and a "Next captures" list in `timelapse status`.
+- Added a device-wide `location` in `config.yaml`; `timelapse setup` can detect it from the internet connection, search by city, or take coordinates, and warns if it doesn't match the timezone.
+- Added optional weather recording: current OpenWeatherMap conditions are written with each photo to `<photos_dir>/captures.jsonl`.
+- Added a scheduler that can serve several intents sharing one camera (intents due within 1 s share one capture).
+
+### Changed
+- Sunrise/sunset times are computed offline with `astral` only; OpenWeatherMap is now used for weather, not sun times.
+- `every` slots are aligned to the clock (5m fires on :00, :05, ...) instead of counting from the last capture.
+- The scheduler waits up to 5 minutes for the system clock to sync (NTP) at startup, and the systemd unit starts after `time-sync.target`.
+- The 0.1.0 `mode: interval | times | solar` schedule format is converted automatically; a solar schedule's latitude/longitude becomes the profile's `location`.
+
+### Fixed
+- Fixed a failed interval capture (e.g. disk full) retrying in a tight loop at 100% CPU; a slot is now marked handled whether or not the capture succeeds.
+- Fixed solar captures being skipped every day around midsummer above about 60° latitude.
+- Fixed OpenWeatherMap sun times for tomorrow actually being today's.
+- Fixed captures firing at the wrong time after a clock correction; the scheduler re-checks the wall clock at least every 30 s.
+- Fixed captures after a reboot being skipped for fixed-time and solar schedules when only just missed.
+
 ## [0.1.0] - 2026.03.04
 
 ### Added

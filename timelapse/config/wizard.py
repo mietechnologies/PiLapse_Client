@@ -23,16 +23,19 @@ from timelapse.config.models import (
     CaptureConfig,
     DiskConfig,
     GlobalConfig,
-    IntervalSchedule,
+    AtRule,
+    EveryRule,
+    LocationConfig,
     PreviewConfig,
     ProfileConfig,
     RetentionConfig,
+    Rule,
     RtmpConfig,
-    SolarEvent,
-    SolarSchedule,
+    ScheduleConfig,
     StreamingConfig,
-    TimesSchedule,
+    SunRule,
     VideoConfig,
+    WeatherConfig,
 )
 
 
@@ -99,10 +102,18 @@ def run_wizard(profile: str = "default") -> None:
 
     tz_default = glob.timezone or _detect_system_tz()
     tz = _prompt("Timezone (e.g. Europe/London, America/New_York)", tz_default)
+
+    click.echo("\n  Location (used for sunrise/sunset and weather):")
+    location = _location_step(glob.location, tz)
+
+    weather = _weather_step(glob.weather, location)
+
     glob = GlobalConfig(
         timezone=tz if tz else None,
         log_level=glob.log_level,
         log_dir=glob.log_dir,
+        location=location,
+        weather=weather,
     )
     save_global_config(glob)
     click.echo("  ✓ Global config saved.\n")
@@ -131,49 +142,7 @@ def run_wizard(profile: str = "default") -> None:
 
     # ── schedule ───────────────────────────────────────────────────────────
     click.echo("\n─── Capture schedule ────────────────────────────────────")
-    click.echo("  Modes:")
-    click.echo("    interval  — every N seconds/minutes/hours (e.g. 5m, 1h)")
-    click.echo("    times     — specific times each day (e.g. 08:00,12:00,17:00)")
-    click.echo("    solar     — sunrise/solar_noon/sunset (uses lat/lon)")
-    mode = _choose("Schedule mode", ["interval", "times", "solar"], "interval")
-
-    schedule: IntervalSchedule | TimesSchedule | SolarSchedule
-    if mode == "interval":
-        interval_str = _prompt("Interval (e.g. 30s, 5m, 1h)", "5m")
-        schedule = IntervalSchedule(interval=interval_str)
-    elif mode == "times":
-        times_raw = _prompt(
-            "Times as comma-separated HH:MM (e.g. 08:00,12:00,17:00)", "08:00,12:00,17:00"
-        )
-        times = [t.strip() for t in times_raw.split(",") if t.strip()]
-        schedule = TimesSchedule(times=times)
-    else:
-        lat_s = _prompt("Latitude (decimal degrees, e.g. 51.5)", required=True)
-        lon_s = _prompt("Longitude (decimal degrees, e.g. -0.12)", required=True)
-        click.echo("  Solar events (sunrise / solar_noon / sunset).")
-        events: list[SolarEvent] = []
-        for event_type in ("sunrise", "solar_noon", "sunset"):
-            if _confirm(f"  Capture at {event_type}?", default=event_type != "solar_noon"):
-                offset_s = _prompt(f"  Offset minutes for {event_type} (e.g. +10, -15)", "0")
-                events.append(SolarEvent(type=event_type, offset_minutes=int(offset_s)))  # type: ignore[arg-type]
-        if not events:
-            click.echo("  No solar events selected — defaulting to sunrise.")
-            events = [SolarEvent(type="sunrise", offset_minutes=0)]
-        owm_env = _prompt(
-            "Env var name for OpenWeatherMap API key", "TIMELAPSE_OWM_KEY"
-        )
-        schedule = SolarSchedule(
-            latitude=float(lat_s),
-            longitude=float(lon_s),
-            events=events,
-            owm_api_key_env=owm_env,
-        )
-        click.echo(
-            f"\n  ⚠  Remember to set ${owm_env} in your environment or systemd "
-            "EnvironmentFile before starting the service.\n"
-            "  If the API key is missing, solar events will be skipped until "
-            "the key is available.\n"
-        )
+    schedule = _schedule_step(has_location=location is not None)
 
     # ── video generation ────────────────────────────────────────────────────
     click.echo("\n─── Video generation ────────────────────────────────────")
@@ -280,6 +249,167 @@ def run_wizard(profile: str = "default") -> None:
     click.echo("    timelapse run              — start capturing")
     click.echo("    timelapse status           — check running status")
     click.echo("=" * 60 + "\n")
+
+
+# ─── location ────────────────────────────────────────────────────────────────
+
+
+def _location_step(current: "LocationConfig | None", tz_name: str) -> "LocationConfig | None":
+    from timelapse.utils import location as loc
+
+    if current is not None:
+        label = current.name or f"{current.latitude:.4f}, {current.longitude:.4f}"
+        if _confirm(f"Keep current location ({label})?", default=True):
+            return current
+
+    choice = _choose(
+        "How should we find it", ["detect", "search", "manual", "skip"], "detect"
+    )
+    result: LocationConfig | None = None
+    if choice == "detect":
+        click.echo("  Looking up your location from your internet connection...")
+        place = loc.detect_from_ip()
+        if place and _confirm(
+            f"Found {place.name} ({place.latitude:.2f}, {place.longitude:.2f}). Use this?"
+            , default=True
+        ):
+            result = LocationConfig(
+                latitude=place.latitude, longitude=place.longitude, name=place.name, source="ip"
+            )
+        elif place is None:
+            click.echo("  ✗ Couldn't detect a location (offline?).")
+        if result is None:
+            choice = "search"
+    if result is None and choice == "search":
+        while result is None:
+            query = _prompt("City or place name (blank to enter coordinates)")
+            if not query:
+                choice = "manual"
+                break
+            places = loc.search(query)
+            if not places:
+                click.echo("  ✗ Nothing found. Try another name.")
+                continue
+            for i, p in enumerate(places, 1):
+                click.echo(f"    {i}. {p.name} ({p.latitude:.2f}, {p.longitude:.2f})")
+            pick = _prompt("Pick a number (blank to search again)")
+            if pick.isdigit() and 1 <= int(pick) <= len(places):
+                p = places[int(pick) - 1]
+                result = LocationConfig(
+                    latitude=p.latitude, longitude=p.longitude, name=p.name, source="search"
+                )
+    if result is None and choice == "manual":
+        lat = _prompt_float("Latitude (decimal degrees, e.g. 41.08)", -90, 90)
+        lon = _prompt_float("Longitude (decimal degrees, e.g. -85.14)", -180, 180)
+        result = LocationConfig(latitude=lat, longitude=lon, source="manual")
+
+    if result is not None:
+        _warn_tz_mismatch(result, tz_name)
+    return result
+
+
+def _prompt_float(text: str, lo: float, hi: float) -> float:
+    while True:
+        raw = _prompt(text, required=True)
+        try:
+            v = float(raw)
+        except ValueError:
+            click.echo("  ✗ Enter a number.")
+            continue
+        if lo <= v <= hi:
+            return v
+        click.echo(f"  ✗ Must be between {lo} and {hi}.")
+
+
+def _warn_tz_mismatch(location: LocationConfig, tz_name: str) -> None:
+    try:
+        import zoneinfo
+
+        from timelapse.scheduler.solar import tz_location_mismatch_hours
+
+        tz = zoneinfo.ZoneInfo(tz_name)
+    except Exception:
+        return
+    if tz_location_mismatch_hours(location.longitude, tz) > 2.5:
+        click.echo(
+            f"  ⚠  That location doesn't look like it's in the {tz_name} timezone.\n"
+            "     Check the location and timezone, or sunrise/sunset captures will\n"
+            "     land at odd hours."
+        )
+
+
+# ─── weather ─────────────────────────────────────────────────────────────────
+
+
+def _weather_step(current: WeatherConfig, location: "LocationConfig | None") -> WeatherConfig:
+    if location is None:
+        return current
+    enabled = _confirm(
+        "Record the weather with each photo (needs a free OpenWeatherMap API key)?",
+        default=current.enabled,
+    )
+    if not enabled:
+        return current.model_copy(update={"enabled": False})
+    key_env = _prompt("Env var for the OpenWeatherMap API key", current.api_key_env)
+    units = _choose("Units", ["metric", "imperial"], current.units)
+    click.echo(
+        f"\n  ⚠  Set ${key_env} in your environment or systemd EnvironmentFile.\n"
+        "  Without it, photos are still taken, just without weather.\n"
+    )
+    return current.model_copy(update={"enabled": True, "api_key_env": key_env, "units": units})
+
+
+# ─── schedule ────────────────────────────────────────────────────────────────
+
+
+def _schedule_step(has_location: bool) -> ScheduleConfig:
+    click.echo("  Add one or more rules. The camera fires whenever any rule is due.")
+    click.echo("    at     — fixed times each day (e.g. 07:30 or 08:00,12:00,17:00)")
+    click.echo("    every  — an interval (e.g. 30s, 5m, 1h), optionally only in a window")
+    click.echo("    sun    — sunrise / solar_noon / sunset, with an optional offset")
+    rules: list[Rule] = []
+    while True:
+        options = ["at", "every", "sun", "done"] if rules else ["at", "every", "sun"]
+        kind = _choose("Add a rule", options, "done" if rules else "every")
+        if kind == "done":
+            break
+        if kind == "sun" and not has_location:
+            click.echo("  ✗ Sun rules need a location. Re-run setup and set one first.")
+            continue
+        try:
+            rule = _rule_prompt(kind, has_location)
+        except ValueError as exc:
+            click.echo(f"  ✗ {exc}")
+            continue
+        rules.append(rule)
+        click.echo(f"  ✓ Added: {rule.describe()}")
+    return ScheduleConfig(rules=rules)
+
+
+def _rule_prompt(kind: str, has_location: bool) -> Rule:
+    from pydantic import ValidationError
+
+    data: dict = {}
+    if kind == "at":
+        raw = _prompt("Times as comma-separated HH:MM", "08:00,12:00,17:00")
+        data["at"] = [t.strip() for t in raw.split(",") if t.strip()]
+    elif kind == "every":
+        data["every"] = _prompt("Interval (e.g. 30s, 5m, 1h)", "5m")
+        hint = "e.g. 08:00,18:00" + (" or sunrise-30m,sunset+30m" if has_location else "")
+        window = _prompt(f"Only between (start,end; {hint}; blank = all day)")
+        if window:
+            data["between"] = [w.strip() for w in window.split(",")]
+    else:
+        data["sun"] = _choose("Event", ["sunrise", "solar_noon", "sunset"], "sunrise")
+        data["offset"] = _prompt("Offset (e.g. -15m, +10m, 0)", "0")
+    days = _prompt("Days (e.g. mon,tue,fri; blank = every day)")
+    if days:
+        data["days"] = [d.strip() for d in days.split(",")]
+    model = {"at": AtRule, "every": EveryRule, "sun": SunRule}[kind]
+    try:
+        return model.model_validate(data)
+    except ValidationError as exc:
+        raise ValueError(exc.errors()[0]["msg"]) from exc
 
 
 def _detect_system_tz() -> str:

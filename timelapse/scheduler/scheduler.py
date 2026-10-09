@@ -1,67 +1,100 @@
 """
 Main capture scheduler.
 
-Supports four schedule modes:
-  interval  — every N seconds/minutes/hours
-  times     — one or more fixed HH:MM times per day
-  solar     — sunrise / solar_noon / sunset with optional offsets
+One scheduler thread serves any number of *intents*: schedules that share one
+camera (e.g. the same 3D printer every 5 s for a detailed timelapse and every
+30 s for a short one).  Each intent has its own rules and state; the
+scheduler works out which intents are due next and hands them to `on_due`
+together, so the caller can take one photo and file it for each of them.
 
-Design goals:
-  - Survives reboots: on restart, computes the correct NEXT time from state
-  - No double-captures: 60 s cooldown window around every scheduled slot
-  - Interruptible sleep: wakes every 5 s to check for shutdown / schedule changes
-  - If solar fetch fails, skips all solar events for that day and retries next day
+Behaviour:
+  - Waits for the system clock to sync first (a Pi has no RTC).
+  - Sleeps in short chunks and re-plans from the wall clock each time, so a
+    clock correction moves the schedule instead of being slept through.
+  - A slot is marked handled *before* the capture runs, whether the capture
+    succeeds or not, so a failing capture never re-triggers the same slot.
+  - After downtime, a slot missed by up to `schedule.catch_up` is taken once;
+    older misses are skipped.
+  - While running, a slot that's already past by the time the camera is free
+    (capture slower than the interval) is skipped and counted, never queued.
 """
 
 from __future__ import annotations
 
 import logging
 import threading
-import time
-from datetime import date, datetime, timedelta, timezone
+from dataclasses import dataclass, field
+from datetime import datetime, timedelta, timezone
 from typing import Callable, Optional
 
-from timelapse.config.models import (
-    IntervalSchedule,
-    ProfileConfig,
-    SolarSchedule,
-    TimesSchedule,
-    parse_interval_seconds,
-    parse_hhmm,
-)
-from timelapse.scheduler.solar import SolarTimes, compute_solar_schedule, get_solar_times
+from timelapse.config.models import LocationConfig, ScheduleConfig
+from timelapse.scheduler.clock import wait_for_clock_sync
+from timelapse.scheduler.rules import ScheduleError, next_fire
 from timelapse.scheduler.state import ProfileState
 
 logger = logging.getLogger(__name__)
 
-# Minimum seconds between captures — prevents double-trigger on restart
-CAPTURE_COOLDOWN_S = 60
+# Intents due within this many seconds of each other share one capture
+COALESCE_S = 1.0
 
-# How often the sleep loop wakes to check for shutdown
-SLEEP_TICK_S = 5
+# A slot this late (seconds) while running counts as skipped, not taken
+LATE_TOLERANCE_S = 2.0
+
+# Longest single sleep before re-checking the wall clock
+MAX_SLEEP_S = 30.0
+
+# Re-plan interval when no intent has anything scheduled
+IDLE_SLEEP_S = 300.0
+
+# How long to wait for NTP at startup before scheduling anyway
+CLOCK_SYNC_TIMEOUT_S = 300.0
+
+
+@dataclass
+class Intent:
+    """One schedule sharing the camera."""
+
+    name: str
+    schedule: ScheduleConfig
+    state: ProfileState
+    location: Optional[LocationConfig] = None
+    # Set once the scheduler has planned this intent since starting
+    _started: bool = field(default=False, repr=False)
+
+
+@dataclass
+class PlannedSlot:
+    at: datetime
+    intent: Intent
+    skipped_late: bool = False
+
+
+OnDue = Callable[[list[Intent], datetime], None]
 
 
 class Scheduler:
     """
     Runs in its own thread.  Call `start()` and `stop()`.
 
-    `capture_fn` is called each time a capture should happen.
-    It must be thread-safe (blocking is OK; the scheduler waits for it).
+    `on_due(intents, slot)` is called each time one or more intents are due.
+    It may block (the scheduler waits for it); while it runs, no other
+    capture is started.
     """
 
     def __init__(
         self,
-        profile: str,
-        config: ProfileConfig,
-        state: ProfileState,
-        capture_fn: Callable[[], bool],
+        intents: list[Intent],
+        on_due: OnDue,
         local_tz,
+        *,
+        clock_sync_timeout_s: float = CLOCK_SYNC_TIMEOUT_S,
+        now_fn: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
     ) -> None:
-        self._profile = profile
-        self._config = config
-        self._state = state
-        self._capture_fn = capture_fn
+        self._intents = intents
+        self._on_due = on_due
         self._tz = local_tz
+        self._clock_sync_timeout_s = clock_sync_timeout_s
+        self._now = now_fn
         self._stop_event = threading.Event()
         self._thread: Optional[threading.Thread] = None
 
@@ -71,218 +104,122 @@ class Scheduler:
         if self._thread and self._thread.is_alive():
             return
         self._stop_event.clear()
-        self._thread = threading.Thread(
-            target=self._run, name=f"scheduler-{self._profile}", daemon=True
+        self._thread = threading.Thread(target=self._run, name="scheduler", daemon=True)
+        logger.info(
+            "Scheduler started for %s.", ", ".join(f"'{i.name}'" for i in self._intents)
         )
-        logger.info("Scheduler started for profile '%s'.", self._profile)
         self._thread.start()
 
     def stop(self, timeout: float = 10.0) -> None:
         self._stop_event.set()
         if self._thread:
             self._thread.join(timeout=timeout)
-        logger.info("Scheduler stopped for profile '%s'.", self._profile)
+        logger.info("Scheduler stopped.")
 
     # ── main loop ──────────────────────────────────────────────────────────
 
     def _run(self) -> None:
+        wait_for_clock_sync(self._stop_event, self._clock_sync_timeout_s)
         while not self._stop_event.is_set():
             try:
-                self._tick()
+                self._stop_event.wait(self.tick())
             except Exception as exc:
                 logger.exception("Unhandled scheduler error: %s", exc)
                 self._stop_event.wait(30)  # back-off before retry
 
-    def _tick(self) -> None:
-        status = self._state.get_status()
-        if status == "completed":
-            logger.debug("Profile completed; scheduler idle.")
-            self._stop_event.wait(60)
-            return
+    def tick(self) -> float:
+        """
+        Fire whatever is due now; return how long to sleep before the next
+        tick.  Public so tests can drive the scheduler without a thread.
+        """
+        now = self._now()
+        slots = self.plan(now)
 
-        now = datetime.now(self._tz)
-        next_dt = self._next_capture_time(now)
-
-        if next_dt is None:
-            # Solar fetch failure — skip the rest of the day
-            seconds_until_midnight = self._seconds_until_midnight(now)
-            logger.warning(
-                "No next capture time (solar fetch failed?). "
-                "Sleeping %d s until midnight.", seconds_until_midnight
-            )
-            self._interruptible_sleep(seconds_until_midnight)
-            return
-
-        delay = (next_dt - now).total_seconds()
-
-        if delay > 0:
-            logger.info(
-                "Next capture at %s (in %.0f s).",
-                next_dt.strftime("%Y-%m-%d %H:%M:%S %Z"),
-                delay,
-            )
-            self._interruptible_sleep(delay)
-            if self._stop_event.is_set():
-                return
-            # We slept the full scheduled delay — always capture now.
-            # (Cooldown guard only applies to the startup/catchup path below.)
-        else:
-            # delay <= 0: startup or missed-slot catchup — guard against
-            # double-capture if the service was restarted within the cooldown window.
-            if self._state.was_recently_captured(CAPTURE_COOLDOWN_S):
-                logger.debug(
-                    "Skipping — captured within last %d s (restart guard).",
-                    CAPTURE_COOLDOWN_S,
+        for s in slots:
+            if s.skipped_late:
+                s.intent.state.record_skipped()
+                logger.warning(
+                    "[%s] Skipped a missed slot (camera still busy, or the clock jumped).",
+                    s.intent.name,
                 )
-                self._interruptible_sleep(CAPTURE_COOLDOWN_S + 1)
-                return
 
-        logger.info("Triggering capture.")
-        ok = self._capture_fn()
-        if ok:
-            logger.info("Capture succeeded.")
-        else:
-            logger.warning("Capture reported failure.")
+        if not slots:
+            return IDLE_SLEEP_S
 
-    # ── next-time logic ────────────────────────────────────────────────────
+        first = min(s.at for s in slots)
+        delay = (first - now).total_seconds()
+        if delay > 0:
+            if delay > MAX_SLEEP_S:
+                logger.debug("Next capture at %s.", first.astimezone(self._tz))
+            return min(delay, MAX_SLEEP_S)
 
-    def _next_capture_time(self, now: datetime) -> Optional[datetime]:
-        schedule = self._config.schedule
+        due = [s for s in slots if (s.at - first).total_seconds() <= COALESCE_S]
+        for s in due:
+            # Mark the slot handled before capturing, success or not.
+            s.intent.state.set_last_slot(max(s.at, now))
+        intents = [s.intent for s in due]
+        logger.info(
+            "Capture due for %s (slot %s).",
+            ", ".join(i.name for i in intents),
+            first.astimezone(self._tz).strftime("%Y-%m-%d %H:%M:%S %Z"),
+        )
+        try:
+            self._on_due(intents, first)
+        except Exception as exc:
+            logger.exception("Capture callback failed: %s", exc)
+        return 0.0
 
-        if isinstance(schedule, IntervalSchedule):
-            return self._next_interval(now, schedule)
+    # ── planning ───────────────────────────────────────────────────────────
 
-        if isinstance(schedule, TimesSchedule):
-            return self._next_times(now, schedule)
+    def plan(self, now: datetime) -> list[PlannedSlot]:
+        """Next slot for each active intent."""
+        slots: list[PlannedSlot] = []
+        for intent in self._intents:
+            if intent.state.get_status() in ("completed", "paused"):
+                continue
+            slot = self._plan_intent(intent, now)
+            if slot is not None:
+                slots.append(slot)
+        return slots
 
-        if isinstance(schedule, SolarSchedule):
-            return self._next_solar(now, schedule)
-
-        logger.error("Unknown schedule type: %s", type(schedule))
-        return None
-
-    # ── interval ───────────────────────────────────────────────────────────
-
-    def _next_interval(self, now: datetime, schedule: IntervalSchedule) -> datetime:
-        interval_s = schedule.interval_seconds
-        last = self._state.get_last_capture_time()
-
-        if last is None:
-            # First ever capture — do it immediately
-            return now
-
-        # Ensure aware datetime
-        if last.tzinfo is None:
+    def _plan_intent(self, intent: Intent, now: datetime) -> Optional[PlannedSlot]:
+        last = intent.state.get_last_slot_time()
+        if last is not None and last.tzinfo is None:
             last = last.replace(tzinfo=timezone.utc)
-        last_local = last.astimezone(self._tz)
+        # Never plan from the future (e.g. state written before a clock fix)
+        if last is not None and last > now:
+            last = now
 
-        next_dt = last_local + timedelta(seconds=interval_s)
-        if next_dt <= now:
-            # We missed a slot (reboot, etc.) — capture as soon as possible
-            return now
-        return next_dt
-
-    # ── fixed times ────────────────────────────────────────────────────────
-
-    def _next_times(self, now: datetime, schedule: TimesSchedule) -> datetime:
-        today = now.date()
-        candidates: list[datetime] = []
-
-        for time_str in schedule.times:
-            h, m = parse_hhmm(time_str)
-            candidate = now.replace(hour=h, minute=m, second=0, microsecond=0)
-            # Must be strictly after last capture + cooldown
-            last = self._state.get_last_capture_time()
-            if last:
-                if last.tzinfo is None:
-                    last = last.replace(tzinfo=timezone.utc)
-                cutoff = last.astimezone(self._tz) + timedelta(seconds=CAPTURE_COOLDOWN_S)
-                if candidate <= cutoff:
-                    continue
-            if candidate > now:
-                candidates.append(candidate)
-
-        if candidates:
-            return min(candidates)
-
-        # All today's slots are past — find first slot tomorrow
-        tomorrow = today + timedelta(days=1)
-        h, m = parse_hhmm(schedule.times[0])
-        return datetime(
-            tomorrow.year, tomorrow.month, tomorrow.day, h, m, 0,
-            tzinfo=now.tzinfo,
-        )
-
-    # ── solar ──────────────────────────────────────────────────────────────
-
-    def _next_solar(self, now: datetime, schedule: SolarSchedule) -> Optional[datetime]:
-        today_str = now.date().isoformat()
-
-        # Use cached times if available for today
-        cached = self._state.get_solar_cache(today_str)
-        if cached:
-            solar = SolarTimes.from_dict(cached)
+        if not intent._started:
+            grace = timedelta(seconds=intent.schedule.catch_up_seconds)
         else:
-            solar = get_solar_times(
-                lat=schedule.latitude,
-                lon=schedule.longitude,
-                api_key_env=schedule.owm_api_key_env,
-                for_date=now.date(),
-            )
-            if solar is None:
-                return None  # caller will handle
-            self._state.set_solar_cache(today_str, solar.as_dict())
+            grace = timedelta(seconds=LATE_TOLERANCE_S)
+        floor = now - grace
+        start = max(last, floor) if last is not None else floor
 
-        slots = compute_solar_schedule(solar, schedule.events, self._tz)
-        last = self._state.get_last_capture_time()
+        try:
+            nxt = next_fire(intent.schedule, start, self._tz, intent.location)
+        except ScheduleError as exc:
+            logger.error("[%s] %s", intent.name, exc)
+            return None
 
-        for slot in slots:
-            if slot.tzinfo is None:
-                slot = slot.replace(tzinfo=self._tz)
-            # Guard against double-capture
-            if last:
-                if last.tzinfo is None:
-                    last = last.replace(tzinfo=timezone.utc)
-                cutoff = last.astimezone(self._tz) + timedelta(seconds=CAPTURE_COOLDOWN_S)
-                if slot <= cutoff:
-                    continue
-            if slot >= now:
-                return slot
+        skipped_late = False
+        if intent._started and last is not None and start > last:
+            # Was there a slot between the last one we handled and the floor?
+            try:
+                missed = next_fire(intent.schedule, last, self._tz, intent.location)
+            except ScheduleError:
+                missed = None
+            skipped_late = missed is not None and missed <= floor
+            if skipped_late:
+                # Count it once: move the marker past the missed slot
+                intent.state.set_last_slot(floor)
+        intent._started = True
 
-        # All today's solar slots have passed — get first slot tomorrow
-        tomorrow = now.date() + timedelta(days=1)
-        tomorrow_str = tomorrow.isoformat()
-        tomorrow_solar = get_solar_times(
-            lat=schedule.latitude,
-            lon=schedule.longitude,
-            api_key_env=schedule.owm_api_key_env,
-            for_date=tomorrow,
+        if nxt is None:
+            return None
+        # Keep slots in UTC: same-tzinfo comparisons use wall time and would
+        # misorder slots in a repeated DST hour.
+        return PlannedSlot(
+            at=nxt.astimezone(timezone.utc), intent=intent, skipped_late=skipped_late
         )
-        if tomorrow_solar is None:
-            # sleep till midnight and retry
-            return datetime(
-                now.year, now.month, now.day, 23, 59, 0, tzinfo=self._tz
-            ) + timedelta(minutes=1)
-        self._state.set_solar_cache(tomorrow_str, tomorrow_solar.as_dict())
-        tomorrow_slots = compute_solar_schedule(tomorrow_solar, schedule.events, self._tz)
-        if tomorrow_slots:
-            return tomorrow_slots[0]
-        return None
-
-    # ── helpers ────────────────────────────────────────────────────────────
-
-    def _interruptible_sleep(self, seconds: float) -> None:
-        """Sleep for `seconds` but wake on stop_event every SLEEP_TICK_S."""
-        end = time.monotonic() + seconds
-        while not self._stop_event.is_set():
-            remaining = end - time.monotonic()
-            if remaining <= 0:
-                break
-            self._stop_event.wait(min(SLEEP_TICK_S, remaining))
-
-    @staticmethod
-    def _seconds_until_midnight(now: datetime) -> float:
-        tomorrow = (now + timedelta(days=1)).replace(
-            hour=0, minute=0, second=0, microsecond=0
-        )
-        return (tomorrow - now).total_seconds()

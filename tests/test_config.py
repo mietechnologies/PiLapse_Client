@@ -16,14 +16,18 @@ from pydantic import ValidationError
 from timelapse.config.models import (
     CaptureConfig,
     GlobalConfig,
-    IntervalSchedule,
+    AtRule,
+    EveryRule,
+    LocationConfig,
     ProfileConfig,
     RtmpConfig,
-    SolarEvent,
-    SolarSchedule,
-    TimesSchedule,
-    parse_interval_seconds,
+    ScheduleConfig,
+    SunRule,
+    TimeSpec,
+    WeatherConfig,
     parse_hhmm,
+    parse_interval_seconds,
+    parse_offset_seconds,
 )
 
 
@@ -80,70 +84,102 @@ class TestParseHHMM:
             parse_hhmm("1200")
 
 
-# ─── IntervalSchedule ─────────────────────────────────────────────────────────
+# ─── schedule rules ───────────────────────────────────────────────────────────
 
 
-class TestIntervalSchedule:
-    def test_valid(self):
-        s = IntervalSchedule(interval="10m")
-        assert s.interval_seconds == 600
+class TestParseOffset:
+    @pytest.mark.parametrize(
+        "value,expected",
+        [("-15m", -900), ("+1h", 3600), ("30s", 30), ("0", 0), ("10", 600), (-15, -900)],
+    )
+    def test_valid(self, value, expected):
+        assert parse_offset_seconds(value) == expected
 
-    def test_default_interval(self):
-        s = IntervalSchedule()
-        assert s.interval == "5m"
+    def test_invalid(self):
+        with pytest.raises(ValueError):
+            parse_offset_seconds("soon")
 
-    def test_invalid_interval(self):
+
+class TestTimeSpec:
+    def test_clock(self):
+        t = TimeSpec.parse("08:30")
+        assert (t.hour, t.minute, t.sun) == (8, 30, None)
+
+    def test_sun_with_offset(self):
+        t = TimeSpec.parse("sunset+30m")
+        assert t.sun == "sunset" and t.offset_s == 1800
+
+    def test_invalid(self):
+        with pytest.raises(ValueError):
+            TimeSpec.parse("lunchtime")
+
+
+class TestRules:
+    def test_at_sorted_and_single_string(self):
+        assert AtRule(at=["17:00", "08:00"]).at == ["08:00", "17:00"]
+        assert AtRule.model_validate({"at": "07:30"}).at == ["07:30"]
+
+    def test_unquoted_yaml_times(self):
+        data = yaml.safe_load("at: [12:00, 08:30]")
+        assert data["at"][0] == 720  # what YAML 1.1 actually gives us
+        assert AtRule.model_validate(data).at == ["08:30", "12:00"]
+        between = yaml.safe_load("between: [13:00, sunset]")["between"]
+        assert EveryRule(every="5m", between=between).between == ["13:00", "sunset"]
+
+    def test_at_invalid_time(self):
         with pytest.raises(ValidationError):
-            IntervalSchedule(interval="10x")
+            AtRule(at=["25:00"])
 
-
-# ─── TimesSchedule ────────────────────────────────────────────────────────────
-
-
-class TestTimesSchedule:
-    def test_valid(self):
-        s = TimesSchedule(times=["08:00", "17:00"])
-        assert s.times == ["08:00", "17:00"]
-
-    def test_sorted(self):
-        s = TimesSchedule(times=["17:00", "08:00", "12:30"])
-        assert s.times == ["08:00", "12:30", "17:00"]
-
-    def test_invalid_time(self):
+    def test_at_empty(self):
         with pytest.raises(ValidationError):
-            TimesSchedule(times=["25:00"])
+            AtRule(at=[])
 
-    def test_empty_raises(self):
+    def test_every(self):
+        r = EveryRule(every="10m", between=["sunrise-30m", "18:00"])
+        assert r.interval_seconds == 600
+        assert r.uses_sun
+
+    def test_every_invalid(self):
         with pytest.raises(ValidationError):
-            TimesSchedule(times=[])
+            EveryRule(every="10x")
+        with pytest.raises(ValidationError):
+            EveryRule(every="5m", between=["08:00"])
 
+    def test_sun(self):
+        r = SunRule(sun="sunset", offset="-15m")
+        assert r.offset_seconds == -900
+        assert r.describe() == "sunset -15m"
 
-# ─── SolarSchedule ────────────────────────────────────────────────────────────
+    def test_days(self):
+        r = AtRule(at=["08:00"], days=["Monday", "fri"])
+        assert r.days == ["mon", "fri"]
+        assert r.weekdays == {0, 4}
+        with pytest.raises(ValidationError):
+            AtRule(at=["08:00"], days=["someday"])
 
-
-class TestSolarSchedule:
-    def test_valid(self):
-        s = SolarSchedule(
-            latitude=51.5,
-            longitude=-0.12,
-            events=[SolarEvent(type="sunrise", offset_minutes=10)],
+    def test_schedule_picks_rule_type_by_key(self):
+        s = ScheduleConfig.model_validate(
+            {"rules": [{"at": ["07:30"]}, {"every": "5m"}, {"sun": "sunrise"}]}
         )
-        assert s.latitude == 51.5
+        assert [type(r) for r in s.rules] == [AtRule, EveryRule, SunRule]
+        assert s.uses_sun
 
-    def test_latitude_range(self):
+    def test_unknown_rule_rejected(self):
         with pytest.raises(ValidationError):
-            SolarSchedule(latitude=91, longitude=0, events=[SolarEvent(type="sunrise")])
+            ScheduleConfig.model_validate({"rules": [{"hourly": True}]})
 
-    def test_no_duplicate_events(self):
-        with pytest.raises(ValidationError, match="Duplicate"):
-            SolarSchedule(
-                latitude=51.5,
-                longitude=-0.12,
-                events=[
-                    SolarEvent(type="sunrise", offset_minutes=0),
-                    SolarEvent(type="sunrise", offset_minutes=0),
-                ],
-            )
+    def test_default_schedule(self):
+        assert ScheduleConfig().describe() == ["every 5m"]
+
+
+class TestWeatherConfig:
+    def test_defaults(self):
+        w = WeatherConfig()
+        assert not w.enabled and w.refresh_seconds == 600
+
+    def test_refresh_floor(self):
+        with pytest.raises(ValidationError):
+            WeatherConfig(refresh="30s")
 
 
 # ─── CaptureConfig ────────────────────────────────────────────────────────────
@@ -203,24 +239,39 @@ class TestProfileConfig:
         assert str(resolved.photos_path) == str(home / "timelapse" / "garden" / "photos")
         assert "{profile}" not in str(resolved.photos_path)
 
-    def test_schedule_discriminator_interval(self):
-        data = {
-            "schedule": {"mode": "interval", "interval": "10m"},
-        }
-        p = ProfileConfig.model_validate(data)
-        assert isinstance(p.schedule, IntervalSchedule)
+    def test_legacy_interval_schedule(self):
+        p = ProfileConfig.model_validate({"schedule": {"mode": "interval", "interval": "10m"}})
+        assert p.schedule.describe() == ["every 10m"]
 
-    def test_schedule_discriminator_solar(self):
+    def test_legacy_times_schedule(self):
+        p = ProfileConfig.model_validate(
+            {"schedule": {"mode": "times", "times": ["17:00", "08:00"]}}
+        )
+        assert p.schedule.describe() == ["at 08:00, 17:00"]
+
+    def test_legacy_solar_schedule_moves_location(self):
         data = {
             "schedule": {
                 "mode": "solar",
                 "latitude": 51.5,
                 "longitude": -0.12,
-                "events": [{"type": "sunrise", "offset_minutes": 0}],
+                "owm_api_key_env": "TIMELAPSE_OWM_KEY",
+                "events": [
+                    {"type": "sunrise", "offset_minutes": 10},
+                    {"type": "sunset", "offset_minutes": -15},
+                ],
             }
         }
         p = ProfileConfig.model_validate(data)
-        assert isinstance(p.schedule, SolarSchedule)
+        assert p.schedule.describe() == ["sunrise +10m", "sunset -15m"]
+        assert p.location == LocationConfig(latitude=51.5, longitude=-0.12, source="legacy")
+
+    def test_round_trip(self):
+        p = ProfileConfig.model_validate(
+            {"schedule": {"rules": [{"every": "5m", "between": ["sunrise", "sunset"]}]}}
+        )
+        again = ProfileConfig.model_validate(p.model_dump(exclude_none=True))
+        assert again.schedule == p.schedule
 
 
 # ─── GlobalConfig ─────────────────────────────────────────────────────────────
@@ -276,10 +327,14 @@ class TestConfigLoaderRoundTrip:
         from timelapse.config.loader import load_profile_config, save_profile_config
 
         original = ProfileConfig(
-            schedule=IntervalSchedule(interval="30s"),
+            schedule=ScheduleConfig(
+                rules=[EveryRule(every="30s", days=["mon"]), SunRule(sun="sunset", offset="-15m")]
+            ),
         )
         save_profile_config("test", original)
 
         loaded = load_profile_config("test")
-        assert isinstance(loaded.schedule, IntervalSchedule)
-        assert loaded.schedule.interval == "30s"
+        assert loaded.schedule == original.schedule
+        # Saved YAML uses the rule keys, not empty placeholders
+        text = (profiles_dir / "test.yaml").read_text()
+        assert "every: 30s" in text and "sun: sunset" in text
