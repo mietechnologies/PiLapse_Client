@@ -10,6 +10,7 @@ Commands:
   status         Show current capture status
   snapshot       Take a single frame immediately
   gen-video      Generate a video from accumulated photos now
+  server         Connect to / check / disconnect from a PiLapse server
   config validate Check config for errors
 """
 
@@ -67,26 +68,44 @@ def setup(ctx: click.Context) -> None:
 
 
 @cli.command()
+@click.option(
+    "--all", "all_profiles", is_flag=True,
+    help="Run every profile in one process, sharing the camera (recommended).",
+)
 @click.option("--no-preview", is_flag=True, help="Disable preview server even if configured.")
 @click.option("--no-rtmp", is_flag=True, help="Disable RTMP stream even if configured.")
 @click.pass_context
-def run(ctx: click.Context, no_preview: bool, no_rtmp: bool) -> None:
+def run(ctx: click.Context, all_profiles: bool, no_preview: bool, no_rtmp: bool) -> None:
     """Start capturing (foreground; use systemd for background service)."""
     profile = ctx.obj["profile"]
-    _check_setup_or_exit(profile)
 
     # Suppress noisy libcamera INFO/DEBUG lines before any picamera2 import.
-    import os as _os
-    _os.environ.setdefault("LIBCAMERA_LOG_LEVELS", "*:WARNING")
+    os.environ.setdefault("LIBCAMERA_LOG_LEVELS", "*:WARNING")
 
-    from timelapse.config.loader import load_global_config, load_profile_config
+    from timelapse.config.loader import ConfigError, list_profiles, load_global_config, load_profile_config
     from timelapse.scheduler.rules import validate_schedule
 
-    glob_cfg = load_global_config()
-    prof_cfg = load_profile_config(profile)
-    location = prof_cfg.location or glob_cfg.location
+    if all_profiles:
+        names = list_profiles()
+        if not names:
+            click.echo("No profiles configured. Run: timelapse setup")
+            sys.exit(1)
+    else:
+        _check_setup_or_exit(profile)
+        names = [profile]
 
-    problems = validate_schedule(prof_cfg.schedule, location)
+    glob_cfg = load_global_config()
+    try:
+        configs = {name: load_profile_config(name) for name in names}
+    except ConfigError as exc:
+        click.echo(str(exc), err=True)
+        sys.exit(1)
+
+    problems = [
+        f"{name}: {p}"
+        for name, cfg in configs.items()
+        for p in validate_schedule(cfg.schedule, cfg.location or glob_cfg.location)
+    ]
     if problems:
         for p in problems:
             click.echo(f"✗ {p}", err=True)
@@ -95,8 +114,8 @@ def run(ctx: click.Context, no_preview: bool, no_rtmp: bool) -> None:
     # ── logging ────────────────────────────────────────────────────────────
     from timelapse.utils.log import setup_logging
 
-    setup_logging(glob_cfg.log_path, glob_cfg.log_level, profile)
-    logger.info("PiLapse v%s starting — profile '%s'", __version__, profile)
+    setup_logging(glob_cfg.log_path, glob_cfg.log_level, "all" if all_profiles else profile)
+    logger.info("PiLapse v%s starting — profile(s): %s", __version__, ", ".join(names))
 
     # ── timezone ───────────────────────────────────────────────────────────
     local_tz = _resolve_tz(glob_cfg.timezone)
@@ -107,20 +126,30 @@ def run(ctx: click.Context, no_preview: bool, no_rtmp: bool) -> None:
     tier = get_tier()
     click.echo(PERFORMANCE_NOTES.get(tier, ""))
 
-    # ── state ─────────────────────────────────────────────────────────────
+    # ── state: completed profiles ─────────────────────────────────────────
     from timelapse.scheduler.state import ProfileState
 
-    state = ProfileState(profile)
-    if state.get_status() == "completed" and not click.confirm(
-        f"Profile '{profile}' is marked completed. Reset and start fresh?", default=False
-    ):
-        click.echo("Aborted. Use `timelapse status` to inspect.")
+    for name in list(configs):
+        state = ProfileState(name)
+        if state.get_status() != "completed":
+            continue
+        if all_profiles:
+            # Don't block an unattended service on a prompt.
+            logger.info("Profile '%s' is completed; skipping. Reset with `timelapse -p %s run`.", name, name)
+            del configs[name]
+        elif click.confirm(
+            f"Profile '{name}' is marked completed. Reset and start fresh?", default=False
+        ):
+            state.reset()
+        else:
+            click.echo("Aborted. Use `timelapse status` to inspect.")
+            sys.exit(0)
+    if not configs:
+        click.echo("Every profile is completed; nothing to run.")
         sys.exit(0)
-    if state.get_status() == "completed":
-        state.reset()
 
     # ── camera ────────────────────────────────────────────────────────────
-    from timelapse.capture.camera import check_camera_available, create_camera
+    from timelapse.capture.camera import check_camera_available
 
     avail, msg = check_camera_available()
     if not avail:
@@ -128,108 +157,43 @@ def run(ctx: click.Context, no_preview: bool, no_rtmp: bool) -> None:
         if not click.confirm("Continue with MockCamera (for testing)?", default=False):
             sys.exit(1)
 
-    cam = create_camera(
-        still_width=prof_cfg.capture.width,
-        still_height=prof_cfg.capture.height,
-        preview_width=prof_cfg.streaming.preview.mjpeg_width,
-        preview_height=prof_cfg.streaming.preview.mjpeg_height,
-        jpeg_quality=prof_cfg.capture.jpeg_quality,
-        preview_fps=prof_cfg.streaming.preview.mjpeg_fps,
+    # ── server uploads ────────────────────────────────────────────────────
+    from timelapse.server.uploader import uploader_from_config
+
+    uploader = uploader_from_config(glob_cfg.server)
+
+    # ── start everything ──────────────────────────────────────────────────
+    from timelapse.runner import DeviceRunner
+
+    device = DeviceRunner(
+        configs,
+        local_tz,
+        location=glob_cfg.location,
+        weather_cfg=glob_cfg.weather,
+        uploader=uploader,
+        preview=not no_preview,
+        rtmp=not no_rtmp,
     )
-    cam.start()
-
-    # ── disk guard ────────────────────────────────────────────────────────
-    from timelapse.disk.guard import DiskGuard
-
-    disk_guard = DiskGuard(
-        min_free_gb=prof_cfg.disk.min_free_gb,
-        photos_dir=prof_cfg.photos_path,
-        videos_dir=prof_cfg.videos_path,
-        archive_dir=prof_cfg.archive_path,
-        policy=prof_cfg.disk.retention.policy,
-    )
-
-    # ── video generator ───────────────────────────────────────────────────
-    from timelapse.video.generator import VideoGenerator
-
-    video_gen = VideoGenerator(prof_cfg, state)
-
-    # ── capture pipeline ──────────────────────────────────────────────────
-    from timelapse.capture.pipeline import CapturePipeline
-
-    from timelapse.weather import WeatherRecorder
-
-    weather = WeatherRecorder(glob_cfg.weather, location)
-    weather.start()
-
-    pipeline = CapturePipeline(
-        config=prof_cfg,
-        state=state,
-        camera=cam,
-        disk_guard=disk_guard,
-        video_trigger_fn=video_gen.generate_async,
-        weather=weather,
-    )
-
-    # ── streaming ─────────────────────────────────────────────────────────
-    from timelapse.streaming.webserver import StreamingController
-
-    stream_ctrl = StreamingController(prof_cfg, cam, profile)
     if no_preview:
         click.echo("Preview disabled via --no-preview.")
-    else:
-        try:
-            stream_ctrl.start()
-        except Exception as exc:
-            logger.warning("Streaming failed to start: %s — capture continues.", exc)
-
-    # ── scheduler ─────────────────────────────────────────────────────────
-    from timelapse.scheduler.scheduler import Intent, Scheduler
-
-    scheduler = Scheduler(
-        intents=[Intent(profile, prof_cfg.schedule, state, location)],
-        on_due=lambda intents, slot: pipeline.capture(),
-        local_tz=local_tz,
-    )
-    scheduler.start()
-
-    # ── periodic disk check ────────────────────────────────────────────────
-    disk_timer: Optional[threading.Timer] = None
-
-    def _check_disk():
-        nonlocal disk_timer
-        freed = disk_guard.enforce()
-        if freed:
-            logger.info("Periodic disk guard freed %d file(s).", freed)
-        ds = disk_guard.status()
-        if not ds["ok"]:
-            logger.warning("Disk free space low: %.2f GB (min %.2f GB)", ds["free_gb"], ds["min_free_gb"])
-        disk_timer = threading.Timer(prof_cfg.disk.check_interval_s, _check_disk)
-        disk_timer.daemon = True
-        disk_timer.start()
-
-    _check_disk()
+    device.start()
 
     # ── signal handling / graceful shutdown ───────────────────────────────
     def _shutdown(sig, frame):
         click.echo(f"\nShutting down (signal {sig})...")
-        if disk_timer:
-            disk_timer.cancel()
-        scheduler.stop()
-        weather.stop()
-        stream_ctrl.stop()
-        cam.stop()
+        device.stop()
         logger.info("Clean shutdown complete.")
         sys.exit(0)
 
     signal.signal(signal.SIGINT, _shutdown)
     signal.signal(signal.SIGTERM, _shutdown)
 
-    click.echo(f"PiLapse running — profile '{profile}'.  Press Ctrl-C to stop.")
-    # Brief pause so the scheduler thread can complete its first capture
+    click.echo(f"PiLapse running — profile(s): {', '.join(configs)}.  Press Ctrl-C to stop.")
+    # Brief pause so the scheduler threads can complete their first capture
     # before the status snapshot is printed (avoids mid-capture race).
     import time as _time; _time.sleep(0.5)
-    _print_status(profile, state, prof_cfg, disk_guard, glob_cfg, local_tz)
+    for r in device.runners:
+        _print_status(r.name, r.state, r.config, r.disk_guard, glob_cfg, local_tz)
 
     # Block main thread indefinitely
     signal.pause()
@@ -424,6 +388,40 @@ def gen_video(ctx: click.Context, force: bool) -> None:
     else:
         click.echo("Video generation failed — check logs.", err=True)
         sys.exit(1)
+
+
+# ─── server subgroup ─────────────────────────────────────────────────────────
+
+
+@cli.group("server")
+def server_group() -> None:
+    """Connect this Pi to a PiLapse server (optional)."""
+
+
+@server_group.command("connect")
+@click.option("--url", default=None, help="Server URL, e.g. http://pilapse.local:3000")
+@click.option("--name", default=None, help="Camera name on the server (default: hostname).")
+def server_connect(url: Optional[str], name: Optional[str]) -> None:
+    """Log in to a server and register this Pi as a camera."""
+    from timelapse.server.connect import connect
+
+    connect(url=url, name=name)
+
+
+@server_group.command("status")
+def server_status() -> None:
+    """Show the server connection and upload queue."""
+    from timelapse.server.connect import status
+
+    status()
+
+
+@server_group.command("disconnect")
+def server_disconnect() -> None:
+    """Stop uploading and forget this Pi's device token."""
+    from timelapse.server.connect import disconnect
+
+    disconnect()
 
 
 # ─── config subgroup ─────────────────────────────────────────────────────────

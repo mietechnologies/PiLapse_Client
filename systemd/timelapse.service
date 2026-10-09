@@ -1,0 +1,70 @@
+# PiLapse systemd service — one process runs every profile
+#
+# The camera can only be opened by one process, so all profiles (e.g. a 5s
+# and a 30s lapse of the same view) run together in this one service.
+#
+# INSTALL:
+#   sudo cp systemd/timelapse.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now timelapse
+#
+# Upgrading from 0.1.x per-profile units:
+#   sudo systemctl disable --now 'timelapse@*'
+#   sudo rm /etc/systemd/system/timelapse@.service
+#
+# MANAGING:
+#   sudo systemctl restart timelapse      # after adding/editing a profile
+#   journalctl -u timelapse -f            # live logs
+#
+# SECRETS:
+#   Stream keys and the preview password: /etc/timelapse/pilapse.env
+#   (0600 root:root), lines like:
+#     TIMELAPSE_RTMP_KEY_DEFAULT=your-stream-key
+#     TIMELAPSE_WEB_PASSWORD=your-preview-password
+#     TIMELAPSE_OWM_KEY=your-owm-api-key   (weather recording)
+#   The server device token is written by `timelapse server connect` (run as
+#   the service user, not sudo) to ~/.config/timelapse/secrets/server.env.
+
+[Unit]
+Description=PiLapse timelapse service (all profiles)
+After=network-online.target time-sync.target
+Wants=network-online.target
+# The app also waits (up to 5 min) for NTP itself: a Pi has no RTC, so the
+# clock is wrong after a power cut until it syncs.
+# Restart if the camera isn't ready at first boot
+StartLimitIntervalSec=120
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=pi
+Group=pi
+
+# Load secrets (stream keys, preview password) if the file exists.
+# Create with: sudo install -m 600 /dev/null /etc/timelapse/pilapse.env
+EnvironmentFile=-/etc/timelapse/pilapse.env
+
+# Run in foreground; systemd handles daemonization
+ExecStart=/usr/local/bin/timelapse run --all
+
+# Graceful stop on SIGTERM (the app handles it)
+KillSignal=SIGTERM
+TimeoutStopSec=30
+
+# Restart on failure (not on clean exit or explicit stop)
+Restart=on-failure
+RestartSec=10
+
+# Resource limits — keeps Pi Zero W responsive under load
+# Lower priority than system services
+Nice=5
+# Limit video generation CPU burst on weak hardware
+CPUQuota=90%
+
+# Logging goes to journald; rotating file logs are also written by the app
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=timelapse
+
+[Install]
+WantedBy=multi-user.target

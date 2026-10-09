@@ -116,3 +116,25 @@ def create_secrets_file_template(profile: str) -> Path:
         )
         path.chmod(0o600)
     return path
+
+
+def write_secret(path: Path, key: str, value: Optional[str]) -> None:
+    """
+    Set (or, with value=None, remove) KEY in a 0600 KEY=VALUE file, keeping
+    any other lines. The file is replaced atomically.
+    """
+    path = Path(path).expanduser()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.parent.chmod(0o700)
+
+    lines = path.read_text().splitlines() if path.exists() else []
+    kept = [ln for ln in lines if ln.partition("=")[0].strip() != key]
+    if value is not None:
+        kept.append(f"{key}={value}")
+
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w") as f:
+        f.write("\n".join(kept) + ("\n" if kept else ""))
+    os.chmod(tmp, 0o600)
+    os.replace(tmp, path)

@@ -14,6 +14,8 @@ from __future__ import annotations
 
 import json
 import logging
+import os
+import shutil
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -42,6 +44,9 @@ class CapturePipeline:
 
     `video_trigger_fn` is called when the photo batch threshold is reached.
     It should be non-blocking (e.g., submit to a thread pool).
+
+    `on_captured_fn(path, captured_at)` is called after each successful
+    capture (used to queue server uploads). It must also be non-blocking.
     """
 
     def __init__(
@@ -52,6 +57,7 @@ class CapturePipeline:
         disk_guard: "DiskGuard",
         video_trigger_fn: "callable | None" = None,
         weather: "WeatherRecorder | None" = None,
+        on_captured_fn: "callable | None" = None,
     ) -> None:
         self._cfg = config
         self._state = state
@@ -59,6 +65,7 @@ class CapturePipeline:
         self._disk_guard = disk_guard
         self._video_trigger = video_trigger_fn
         self._weather = weather
+        self._on_captured = on_captured_fn
 
     def __call__(self) -> bool:
         """Callable interface for the Scheduler."""
@@ -68,7 +75,50 @@ class CapturePipeline:
         """
         Take one timelapse frame.  Returns True on success.
         """
-        # 1. Disk guard — enforce free space before writing
+        return self.capture_photo() is not None
+
+    def capture_photo(self) -> "tuple[Path, datetime] | None":
+        """
+        Take one timelapse frame and file it for this profile.
+        Returns (path, captured_at), or None if nothing was captured.
+        """
+        if not self._ensure_space():
+            return None
+
+        now = datetime.now(timezone.utc)
+        path = self._cfg.photos_path / make_filename(now)
+
+        ok = self._camera.capture_still(path, timeout_s=self._cfg.capture.capture_timeout_s)
+        if not ok:
+            return None
+
+        self._record(path, now)
+        return path, now
+
+    def adopt(self, source: Path, captured_at: datetime) -> bool:
+        """
+        File a photo another profile just took (several intents due at the
+        same moment share one capture).  Hard-links when possible, so the
+        copy costs no extra space.
+        """
+        if not self._ensure_space():
+            return False
+
+        path = self._cfg.photos_path / source.name
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            try:
+                os.link(source, path)
+            except OSError:
+                shutil.copy2(source, path)
+        except OSError as exc:
+            logger.error("Could not file shared photo %s: %s", source.name, exc)
+            return False
+
+        self._record(path, captured_at)
+        return True
+
+    def _ensure_space(self) -> bool:
         freed = self._disk_guard.enforce()
         if freed:
             logger.info("Disk guard freed %d file(s) to reclaim space.", freed)
@@ -79,20 +129,13 @@ class CapturePipeline:
                 "Free up space or lower min_free_gb."
             )
             return False
+        return True
 
-        # 2. Build path
-        now = datetime.now(timezone.utc)
-        filename = make_filename(now)
-        path = self._cfg.photos_path / filename
-
-        # 3. Capture
-        ok = self._camera.capture_still(path, timeout_s=self._cfg.capture.capture_timeout_s)
-        if not ok:
-            return False
-
-        # 4. Update state
-        self._state.record_capture(now)
-        self._log_capture(filename, now)
+    def _record(self, path: Path, captured_at: datetime) -> None:
+        """Update state and run post-capture steps for a filed photo."""
+        filename = path.name
+        self._state.record_capture(captured_at)
+        self._log_capture(filename, captured_at)
         batch = self._state.get_current_batch()
         logger.info(
             "Captured %s  (batch %d / %d)",
@@ -101,14 +144,18 @@ class CapturePipeline:
             self._cfg.video.photos_per_video,
         )
 
-        # 5. Check video threshold
+        if self._on_captured:
+            try:
+                self._on_captured(path, captured_at)
+            except Exception as exc:
+                logger.error("Post-capture hook failed for %s: %s", filename, exc)
+
+        # Check video threshold
         if batch >= self._cfg.video.photos_per_video:
             logger.info("Video threshold reached — triggering generation.")
             if self._video_trigger:
                 self._video_trigger()
             # Reset batch counter (done inside record_video)
-
-        return True
 
     def _log_capture(self, filename: str, captured_at: datetime) -> None:
         """Append one line per photo with the weather at capture time."""

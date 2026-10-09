@@ -108,12 +108,9 @@ def run_wizard(profile: str = "default") -> None:
 
     weather = _weather_step(glob.weather, location)
 
-    glob = GlobalConfig(
-        timezone=tz if tz else None,
-        log_level=glob.log_level,
-        log_dir=glob.log_dir,
-        location=location,
-        weather=weather,
+    # Update in place so other device-wide settings (e.g. server) survive.
+    glob = glob.model_copy(
+        update={"timezone": tz if tz else None, "location": location, "weather": weather}
     )
     save_global_config(glob)
     click.echo("  ✓ Global config saved.\n")
@@ -240,13 +237,23 @@ def run_wizard(profile: str = "default") -> None:
     )
     save_profile_config(profile, profile_cfg)
 
+    # ── server (optional, device-wide) ────────────────────────────────────
+    if glob.server:
+        click.echo(f"\n  Photos from this profile will upload to {glob.server.url}.")
+    else:
+        click.echo("\n─── PiLapse server (optional) ───────────────────────────")
+        if _confirm("Connect this Pi to a PiLapse server now?", default=False):
+            from timelapse.server.connect import connect
+
+            connect()
+
     click.echo("\n" + "=" * 60)
     click.echo(f"  ✓ Profile '{profile}' saved.")
     click.echo(f"  Config: ~/.config/timelapse/profiles/{profile}.yaml")
     click.echo("")
     click.echo("  Next steps:")
     click.echo("    timelapse config validate  — check config for issues")
-    click.echo("    timelapse run              — start capturing")
+    click.echo("    timelapse run --all        — start capturing (every profile)")
     click.echo("    timelapse status           — check running status")
     click.echo("=" * 60 + "\n")
 

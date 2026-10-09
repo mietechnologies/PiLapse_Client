@@ -1,6 +1,6 @@
 # PiLapse
 
-A production-grade, fully standalone Raspberry Pi timelapse system with live preview and optional RTMP restreaming. No external server required.
+A production-grade, fully standalone Raspberry Pi timelapse system with live preview and optional RTMP restreaming. No external server required, but you can optionally connect to a [PiLapse Server](https://github.com/mietechnologies/PiLapse_Server) to collect photos from several cameras.
 
 Designed, built, and tested by [Brett Chapin](https://github.com/BAChapin) / [MieTech LLC](https://github.com/mietechnologies).
 
@@ -15,7 +15,8 @@ Designed, built, and tested by [Brett Chapin](https://github.com/BAChapin) / [Mi
 - **RTMP restreaming** — stream live to YouTube / Twitch / any RTMP server (Pi Zero 2 W+)
 - **Automatic video generation** — ffmpeg stitches frames when your threshold is hit
 - **Disk space guard** — configurable free-space floor with automatic oldest-first cleanup
-- **Multi-profile** — run multiple independent timelapse setups simultaneously
+- **Multi-profile** — several capture intents on one camera (e.g. a detailed 5 s lapse and a short 30 s lapse), all run by one process
+- **Optional server uploads** — every photo is queued and uploaded to your PiLapse Server, surviving outages and restarts
 - **Systemd service** — runs on boot, restarts on failure, survives reboots
 - **Secure by default** — preview binds to localhost; built-in Basic Auth option
 
@@ -98,17 +99,31 @@ timelapse config validate
 ### 3. Run (foreground)
 
 ```bash
-timelapse run
+timelapse run --all        # every profile, sharing the camera
+timelapse -p garden run    # or just one profile
 ```
+
+Only one process can use the camera at a time, so run all your profiles together with `--all` rather than one process per profile. When several profiles are due at the same moment (a 5 s and a 30 s schedule meet every 30 s), one photo is taken and filed for each; the camera captures at the largest resolution any profile asks for.
 
 ### 4. Run as systemd service (auto-start on boot)
 
 ```bash
-sudo cp systemd/timelapse@.service /etc/systemd/system/
+sudo cp systemd/timelapse.service /etc/systemd/system/
 sudo systemctl daemon-reload
-sudo systemctl enable --now timelapse@default
-journalctl -u timelapse@default -f   # live logs
+sudo systemctl enable --now timelapse
+journalctl -u timelapse -f   # live logs
 ```
+
+Upgrading from 0.1.x per-profile units: `sudo systemctl disable --now 'timelapse@*'` first.
+
+### 5. (Optional) Connect to a PiLapse server
+
+```bash
+timelapse server connect
+sudo systemctl restart timelapse
+```
+
+See [Connecting to a PiLapse server](#connecting-to-a-pilapse-server).
 
 ---
 
@@ -119,13 +134,16 @@ timelapse [--profile NAME] COMMAND
 
 Commands:
   setup               Interactive setup wizard
-  run                 Start capturing (foreground)
+  run [--all]         Start capturing (foreground); --all runs every profile
   status              Show capture statistics and disk status
   snapshot            Take one frame immediately (outside normal schedule)
   gen-video           Generate video from current photo batch now
   schedule preview    List upcoming capture times
   config validate     Check config for errors
   config show         Print resolved config as YAML
+  server connect      Log in to a PiLapse server and register this Pi
+  server status       Show connection, token and upload queue
+  server disconnect   Stop uploading and forget the device token
 ```
 
 ---
@@ -185,6 +203,31 @@ Optionally, `weather.enabled: true` records the current conditions from OpenWeat
 
 ---
 
+## Connecting to a PiLapse server
+
+A [PiLapse Server](https://github.com/mietechnologies/PiLapse_Server) is optional. When connected, the Pi keeps capturing exactly as before and also uploads every photo, tagged with the profile (intent) that took it.
+
+Run this on the Pi as the same user the service runs as (not with `sudo`):
+
+```
+$ timelapse server connect
+Server URL (e.g. http://pilapse.local:3000): pilapse.local:3000
+  ✓ Connected to PiLapse Server 1.0.0
+Email: you@example.com
+Password:
+  ✓ Logged in
+Name this camera [printer-pi]: Printer
+  ✓ Registered "Printer". Photos from every profile will upload to the server.
+```
+
+If the server has no accounts yet, this creates the owner account instead of logging in. The setup wizard also offers this step.
+
+- The Pi is registered once as a camera; each profile shows up on the server as an intent of that camera.
+- The server returns a **device token** for this Pi, stored in `~/.config/timelapse/secrets/server.env` (0600). Your password is not stored.
+- Uploads run in the background from a queue in `~/.local/share/timelapse/upload-queue/`. If the server is unreachable, photos wait there and upload when it's back. Photos deleted locally before they upload (`after_video: delete`, or the disk guard) are skipped.
+- To keep a profile local-only, set `upload_to_server: false` in it.
+- `timelapse server status` checks the connection; `timelapse server disconnect` stops uploading.
+
 ## Secure internet access for live preview
 
 The preview server binds to `127.0.0.1` by default.
@@ -209,7 +252,7 @@ cloudflared tunnel --url http://127.0.0.1:8080
 Stream keys and passwords are read from **environment variables only** — never stored in config files.
 
 ```bash
-# /etc/timelapse/default.env (chmod 0600, loaded by systemd)
+# /etc/timelapse/pilapse.env (chmod 0600, loaded by systemd)
 TIMELAPSE_RTMP_KEY_DEFAULT=your-stream-key
 TIMELAPSE_WEB_PASSWORD=your-preview-password
 TIMELAPSE_OWM_KEY=your-owm-api-key        # weather recording (optional)
