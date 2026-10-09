@@ -12,12 +12,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Added a device-wide `location` in `config.yaml`; `timelapse setup` can detect it from the internet connection, search by city, or take coordinates, and warns if it doesn't match the timezone.
 - Added optional weather recording: current OpenWeatherMap conditions are written with each photo to `<photos_dir>/captures.jsonl`.
 - Added a scheduler that can serve several intents sharing one camera (intents due within 1 s share one capture).
+- Added optional PiLapse Server connection: `timelapse server connect` logs in once (or creates the server's owner account), registers the Pi as a camera, and stores the returned device token in `~/.config/timelapse/secrets/server.env`; `timelapse server status` and `timelapse server disconnect` manage it. The setup wizard offers the same step.
+- Added background photo uploads (`timelapse/server/uploader.py`): every capture is queued on disk and uploaded with its profile as the intent, retrying with backoff while the server is unreachable and resuming after restarts.
+- Added `timelapse run --all`, which runs every profile in one process sharing the camera (`timelapse/runner.py`), and `systemd/timelapse.service` to run it.
+- Added `upload_to_server` (default true) to profiles, and a `server` section to the global config.
 
 ### Changed
 - Sunrise/sunset times are computed offline with `astral` only; OpenWeatherMap is now used for weather, not sun times.
 - `every` slots are aligned to the clock (5m fires on :00, :05, ...) instead of counting from the last capture.
 - The scheduler waits up to 5 minutes for the system clock to sync (NTP) at startup, and the systemd unit starts after `time-sync.target`.
 - The 0.1.0 `mode: interval | times | solar` schedule format is converted automatically; a solar schedule's latitude/longitude becomes the profile's `location`.
+- Profiles now run together in one process. Previously each `timelapse@<profile>` service opened the camera itself, so a second profile could not start while another was running. `systemd/timelapse@.service` is replaced by `systemd/timelapse.service`; disable the old units when upgrading.
+- `--no-rtmp` now actually disables RTMP.
 
 ### Fixed
 - Fixed a failed interval capture (e.g. disk full) retrying in a tight loop at 100% CPU; a slot is now marked handled whether or not the capture succeeds.
@@ -25,6 +31,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Fixed OpenWeatherMap sun times for tomorrow actually being today's.
 - Fixed captures firing at the wrong time after a clock correction; the scheduler re-checks the wall clock at least every 30 s.
 - Fixed captures after a reboot being skipped for fixed-time and solar schedules when only just missed.
+- The setup wizard no longer drops other global settings (such as the server connection) when it saves.
 
 ## [0.1.0] - 2026.03.04
 

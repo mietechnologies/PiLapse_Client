@@ -40,6 +40,7 @@ dev = [
     "pytest-mock>=3.12",
     "freezegun>=1.4",   # Freeze time in scheduler tests
     "pyfakefs>=5.3",    # Fake filesystem for config tests
+    "pillow>=10.0",     # MockCamera test images (on the Pi it comes with picamera2)
 ]
 # picamera2 is installed via apt on Raspberry Pi OS, NOT pip.
 # Listed here for documentation only; do not pip-install on non-Pi.

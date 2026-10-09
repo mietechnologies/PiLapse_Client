@@ -115,3 +115,8 @@ streaming:
     width: 1280
     height: 720
     fps: 30
+
+# ─── Server uploads ──────────────────────────────────────────────────────────
+# When this Pi is connected to a PiLapse server (`timelapse server connect`),
+# every profile uploads its photos. Set false to keep this profile local-only.
+upload_to_server: true

@@ -31,3 +31,14 @@ weather:
   api_key_env: "TIMELAPSE_OWM_KEY"  # env var name (not the key itself)
   refresh: "10m"                    # how often to fetch (min 1m)
   units: metric                     # metric (°C, m/s) | imperial (°F, mph)
+
+# PiLapse server connection (optional). Written by `timelapse server connect`;
+# you shouldn't need to edit it. The device token is kept in the secrets file,
+# never here.
+# server:
+#   url: "http://pilapse.local:3000"
+#   pi_id: "..."
+#   pi_name: "Printer"
+#   token_env: "TIMELAPSE_SERVER_TOKEN"
+#   secrets_file: "~/.config/timelapse/secrets/server.env"
+#   timeout_s: 30

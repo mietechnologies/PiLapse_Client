@@ -480,6 +480,9 @@ class ProfileConfig(BaseModel):
     video: VideoConfig = Field(default_factory=VideoConfig)
     streaming: StreamingConfig = Field(default_factory=StreamingConfig)
 
+    # Only used when this device is connected to a PiLapse server.
+    upload_to_server: bool = True
+
     @model_validator(mode="before")
     @classmethod
     def lift_legacy_solar_location(cls, data):
@@ -526,6 +529,29 @@ class ProfileConfig(BaseModel):
         return Path(self.archive_dir)
 
 
+# ─── server connection ──────────────────────────────────────────────────────
+
+
+class ServerConfig(BaseModel):
+    """Written by `timelapse server connect`; one per device."""
+
+    url: str
+    pi_id: str
+    pi_name: str = ""
+    # The device token itself is never stored here.
+    token_env: str = "TIMELAPSE_SERVER_TOKEN"
+    secrets_file: Optional[str] = "~/.config/timelapse/secrets/server.env"
+    timeout_s: int = Field(30, ge=1, le=300)
+
+    @field_validator("url")
+    @classmethod
+    def http_url(cls, v: str) -> str:
+        v = v.strip().rstrip("/")
+        if not v.startswith(("http://", "https://")):
+            raise ValueError("Server URL must start with http:// or https://")
+        return v
+
+
 # ─── global config ──────────────────────────────────────────────────────────
 
 
@@ -534,6 +560,8 @@ class GlobalConfig(BaseModel):
     timezone: Optional[str] = None
     log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR"] = "INFO"
     log_dir: str = "~/.local/share/timelapse/logs"
+    server: Optional[ServerConfig] = None
+
     # Device location — used by sun-based rules and weather
     location: Optional[LocationConfig] = None
     weather: WeatherConfig = Field(default_factory=WeatherConfig)
